@@ -1,0 +1,9 @@
+.env
+.venv
+__pycache__
+.pytest_cache
+*.py[cod]
+.coverage
+htmlcov
+secrets
+vapid_private_key.pem

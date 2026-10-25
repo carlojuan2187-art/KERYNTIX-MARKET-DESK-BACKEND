@@ -1,0 +1,7 @@
+# SOLO DESARROLLO LOCAL. No usar como configuración de producción.
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:6379:6379"

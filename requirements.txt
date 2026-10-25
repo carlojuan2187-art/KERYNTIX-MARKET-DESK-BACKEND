@@ -1,0 +1,14 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+pydantic>=2.4,<3
+pymongo>=4.7,<5
+httpx>=0.25,<1
+pytest>=7.4
+redis>=5,<7
+websockets==12.0
+python-dotenv>=1,<2
+
+pandas>=2.0,<3
+requests>=2.31,<3
+
+pywebpush>=2.0,<3
