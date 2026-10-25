@@ -1,0 +1,77 @@
+name: Backend CI (Python 3.11)
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unit-and-contract-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Run unit and API contract tests
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q --disable-warnings --maxfail=1
+      - name: Compile all Python modules
+        run: python -m compileall -q api domain engine worker main.py scripts tests
+      - name: Run release preflight
+        env:
+          PYTHONPATH: .
+        run: python -m scripts.release_preflight --json
+
+  live-mongodb-redis-integration:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1}).ok'"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      PYTHONPATH: .
+      FTRADE_ENV: test
+      FTRADE_INTEGRATION: "1"
+      MONGODB_URI: mongodb://localhost:27017/?directConnection=true
+      DATABASE_NAME: ftrade_web_integration_${{ github.run_id }}
+      MONGODB_TIMEOUT_MS: "5000"
+      REDIS_URL: redis://localhost:6379/0
+      FTRADE_DEPLOYMENT_NAME: gha_integration_${{ github.run_id }}
+      PAYMENT_TXS_COLLECTION: integration_payment_txs
+      PAYMENTS_COLLECTION: integration_payments
+      REFERRALS_COLLECTION: integration_referrals
+      REFERRAL_REWARDS_COLLECTION: integration_referral_rewards
+      SUPPORT_TICKETS_COLLECTION: integration_support_tickets
+      ADMIN_AUDIT_COLLECTION: integration_admin_audit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install development dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Exercise real MongoDB and Redis adapters
+        run: python -m pytest -q tests/integration --disable-warnings
