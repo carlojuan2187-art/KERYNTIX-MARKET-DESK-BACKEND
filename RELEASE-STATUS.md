@@ -64,3 +64,11 @@ Se añadieron guardas `requireDemoMode(...)` para pagos, historial/verificación
 ## Conclusión
 
 Este paquete **consolida las fuentes en dos repositorios separados** y deja CI/preflight preparados. Es una base de integración/staging, no una aprobación de producción. El build del frontend, la integración real de infraestructura y la integración end-to-end todavía no se han verificado en este entorno.
+
+
+## Actualización — latencia del feed de precios en vivo (26 de octubre de 2026)
+
+- Eliminadas las lecturas secuenciales de historial Redis por símbolo en cada frame del mini-ticker; las muestras se programan en memoria cada 15 segundos y se escriben en lotes.
+- El estado de salud del feed ahora mide la frescura del último precio real, no solamente la llegada de eventos auxiliares de funding/mark price.
+- El canal WebSocket reenvía volumen 24h y máximos/mínimos además del precio/cambio; el funding se publica solo si cambia la tasa, evitando cientos de frames redundantes por segundo.
+- Pruebas de regresión: no leer historia por cada tick, degradar estado cuando los precios se estancan aunque sigan llegando eventos auxiliares y transportar los campos de mercado en el canal WebSocket.

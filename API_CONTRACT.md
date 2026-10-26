@@ -194,7 +194,8 @@ Transporte backend disponible: `POST /events/ticket` con Bearer válido entrega 
 | `signals`             | `signal.cancelled` | Señal completa, `cancel_reason` exacto y `event:{type:"cancelled",via?}`                  |
 | `signals`             | `signal.tp1`       | Señal completa, `operation_result:"TP1_HIT"`, `event:{type:"tp1",result:"TP1",r,via?}`    |
 | `signals`             | `signal.closed`    | Señal completa, `event:{type:"closed",result:"TP1"                                        | "TP2" | "SL",r,via?}` |
-| `prices`              | `tick`             | `{symbol,price,change_pct}`; 1/s, solo símbolos que cambian                               |
+| `prices`              | `tick`             | `{symbol,price,change_pct,volume_24h,high_24h,low_24h}`; hasta 1/s por símbolo, solo los que cambian
+| `prices`              | `funding.tick`     | `{symbol,funding_rate,mark_price,index_price,next_funding_time}`; procede del flujo mark-price de Binance                               |
 | `market.liquidations` | `summary`          | `LiquidationSummary`, `window:5                                                           | 15    | 60`           |
 | `market.movers`       | `snapshot`         | `MoversSnapshot`, `window:5                                                               | 15    | 60`           |
 | `alerts`              | `alert.new`        | `AlertItem`                                                                               |
