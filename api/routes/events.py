@@ -290,6 +290,14 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
             for queued in pending:
                 queue.put_nowait(queued)
 
+        # Price snapshots are replaceable state, while signals/account events are
+        # notifications that must not be evicted merely because a price tick arrived.
+        # If the queue is full after coalescing old price snapshots, drop this incoming
+        # price snapshot rather than removing a non-price event from the queue.
+        if queue.full() and is_price_snapshot:
+            logger.warning("Se descarta snapshot de precio porque la cola está llena de eventos no reemplazables")
+            return
+
         if queue.full():
             try:
                 queue.get_nowait()
