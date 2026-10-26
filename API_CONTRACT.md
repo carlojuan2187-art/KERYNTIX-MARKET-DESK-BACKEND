@@ -58,7 +58,7 @@ Un nuevo registro recibe `plan:"free"`, `trial_end = now + TRIAL_DAYS`, preferen
 | `GET /market/quotes`                          | Sin body                  | `AssetQuote[]`              | 503 datos no disponibles   |
 | `GET /symbols?query=...`                      | Nombre, prefijo o símbolo | `AssetQuote[]` coincidentes | 422 query inválida         |
 | `GET /symbols/:symbol`                        | Símbolo normalizado       | `AssetQuote`                | 404 par no válido          |
-| `GET /market/candles?symbol=...&timeframe=1h` | `15m,1h,4h,1D`            | `Candle[]` cronológico      | 404 símbolo; 422 timeframe |
+| `GET /market/candles?symbol=...&timeframe=1h` | `1m,5m,15m,1h,4h,1D`            | `Candle[]` cronológico      | 404 símbolo; 422 timeframe |
 
 `AssetQuote = {symbol,name,price,change_pct,volume_24h,high_24h,low_24h,funding_rate,open_interest,buy_pct,volume_ratio,score,trend:{"15M","1H","4H"},sparkline:number[],liquidity_sweep}`. Tendencias: `"up"|"down"|"flat"`. `change_pct` está en unidades porcentuales; `funding_rate` es una fracción (0.0001 = 0.01%). OI y volumen están en USDT.
 

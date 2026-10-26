@@ -1,5 +1,12 @@
 # Estado de consolidación FTrade — 25 de octubre de 2026
 
+## Actualización — temporalidades de gráfico de 1 y 5 minutos (26 de octubre de 2026)
+
+- La ruta `GET /market/candles` admite `timeframe=1m` y `timeframe=5m`, además de 15m, 1h, 4h y 1D.
+- Se ajustó el mensaje de error de timeframe y el contrato de API.
+- Se amplió `test/test_market_feed.py` para afirmar que los endpoints de 1m y 5m responden correctamente y solicitan esos intervalos a Binance REST.
+- Suite ejecutada en esta copia: 307 pruebas aprobadas y 5 omitidas al excluir `test/test_ported_test_radar.py`, que tiene un fallo de importación preexistente de `tests.test_ported_test_regime`.
+
 ## Actualización — administración mediante teléfono verificado (26 de octubre de 2026)
 
 - Se añadió `ADMIN_PHONE_NUMBERS` como alternativa sencilla a `ADMIN_USER_IDS`. Acepta uno o varios teléfonos internacionales, separados por comas.
