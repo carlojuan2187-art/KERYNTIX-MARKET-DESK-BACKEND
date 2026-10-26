@@ -128,7 +128,7 @@ def test_production_worker_status_is_stale_after_heartbeat_window(monkeypatch):
 def test_production_configuration_issues_are_reported_without_leaking_secrets(monkeypatch):
     monkeypatch.setenv("FTRADE_ENV", "production")
     for key in (
-        "ACCESS_TOKEN_SECRET", "AUTH_CODE_PEPPER", "ADMIN_USER_IDS", "TELEGRAM_AUTH_BOT_TOKEN",
+        "ACCESS_TOKEN_SECRET", "AUTH_CODE_PEPPER", "ADMIN_USER_IDS", "ADMIN_PHONE_NUMBERS", "TELEGRAM_AUTH_BOT_TOKEN",
         "TELEGRAM_AUTH_BOT_USERNAME", "PAYMENT_WALLET_ADDRESS", "CORS_ORIGINS", "FTRADE_DEPLOYMENT_NAME",
     ):
         monkeypatch.delenv(key, raising=False)
