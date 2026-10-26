@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover
 from api.cache import JsonCache, cache_from_environment
 from api.repositories.auth import AuthRepository, auth_repository_from_environment
 from api.repositories.user_features import UserFeatureRepository, user_feature_repository_from_environment
-from api.services.auth import is_admin_id
+from api.services.auth import is_admin_user
 from api.services.telegram import TelegramBotAPI
 from api.services.user_features import alert_preferences, wants_alert
 from domain.plans import evaluate_access
@@ -179,7 +179,7 @@ class TelegramNotificationDeliveryWorker:
         prefs = alert_preferences(user)
         if not prefs.get("on") or not prefs.get("telegram") or not wants_alert(user, str(kind or "")):
             return "TELEGRAM_NOTIFICATIONS_DISABLED"
-        access = evaluate_access(user, now=now, is_admin=is_admin_id(user_id))
+        access = evaluate_access(user, now=now, is_admin=is_admin_user(user))
         business_metadata = metadata if isinstance(metadata, Mapping) else {}
         transactional = str(kind or "").lower() == "plans" and business_metadata.get("transactional") is True
         if transactional:

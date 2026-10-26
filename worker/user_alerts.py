@@ -20,7 +20,7 @@ from api.repositories.user_features import UserFeatureRepository, user_feature_r
 from api.services.market import QUOTES_KEY
 from api.services.telegram import TelegramBotAPI
 from api.services.user_features import alert_preferences, wants_alert
-from api.services.auth import is_admin_id
+from api.services.auth import is_admin_user
 from domain.plans import evaluate_access
 
 logger = logging.getLogger("ftrade.user_alerts")
@@ -179,7 +179,7 @@ class UserAlertProcessor:
 
     def _user_allowed(self, user: Mapping[str, Any], now: datetime) -> bool:
         user_id = str(user.get("user_id") or "")
-        return bool(user_id and evaluate_access(user, now=now, is_admin=is_admin_id(user_id))["allowed"])
+        return bool(user_id and evaluate_access(user, now=now, is_admin=is_admin_user(user))["allowed"])
 
     async def _notify_user(self, user: Mapping[str, Any], *, event_id: str, kind: str, title: str,
                            message: str, symbol: str | None, metadata: dict[str, Any], now: datetime) -> tuple[bool, bool]:
