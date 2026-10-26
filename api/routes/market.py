@@ -60,7 +60,7 @@ async def get_candles(
         if reason == "INVALID_SYMBOL":
             raise HTTPException(status_code=404, detail={"code": "SYMBOL_NOT_FOUND", "message": "El par solicitado no es válido."}) from exc
         if reason == "INVALID_TIMEFRAME":
-            raise HTTPException(status_code=422, detail={"code": "INVALID_TIMEFRAME", "message": "timeframe debe ser 15m, 1h, 4h o 1D."}) from exc
+            raise HTTPException(status_code=422, detail={"code": "INVALID_TIMEFRAME", "message": "timeframe debe ser 1m, 5m, 15m, 1h, 4h o 1D."}) from exc
         raise HTTPException(status_code=422, detail={"code": "INVALID_TIMEZONE", "message": "La zona horaria no es una zona IANA válida."}) from exc
     except BinanceInvalidSymbolError as exc:
         raise HTTPException(status_code=404, detail={"code": "SYMBOL_NOT_FOUND", "message": "Binance no reconoce el par solicitado."}) from exc
