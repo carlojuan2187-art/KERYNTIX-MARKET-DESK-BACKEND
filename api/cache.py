@@ -16,6 +16,7 @@ class JsonCache(Protocol):
     async def append_json(self, key: str, value: Any, *, max_length: int, ttl_seconds: int | None = None) -> None: ...
     async def get_list_json(self, key: str, *, limit: int = 100) -> list[Any]: ...
     async def append_timed_json(self, key: str, value: Any, *, timestamp: float, max_length: int, retention_seconds: int) -> None: ...
+    async def append_timed_json_many(self, entries: list[tuple[str, Any, float, int, int]]) -> None: ...
     async def get_timed_list_json(self, key: str, *, limit: int = 100, retention_seconds: int = 7200) -> list[Any]: ...
     async def publish_json(self, channel: str, value: Any) -> int: ...
     async def consume_json(self, key: str) -> Any | None: ...
@@ -71,14 +72,19 @@ class InMemoryJsonCache:
         return [json.loads(json.dumps(item)) for item, _expires in list(queue)[:max(0, limit)]]
 
     async def append_timed_json(self, key: str, value: Any, *, timestamp: float, max_length: int, retention_seconds: int) -> None:
-        now = time.time()
-        queue = self._timed_lists[key]
-        queue.appendleft((json.loads(json.dumps(value, allow_nan=False)), float(timestamp)))
-        cutoff = now - max(1, retention_seconds)
-        retained = sorted(((item, score) for item, score in queue if score >= cutoff), key=lambda pair: pair[1], reverse=True)
-        retained = retained[:max(1, max_length)]
-        queue.clear()
-        queue.extend(retained)
+        await self.append_timed_json_many([(key, value, timestamp, max_length, retention_seconds)])
+
+    async def append_timed_json_many(self, entries: list[tuple[str, Any, float, int, int]]) -> None:
+        # In-memory adapter mirrors the batch contract without Redis round trips.
+        for key, value, timestamp, max_length, retention_seconds in entries:
+            now = time.time()
+            queue = self._timed_lists[key]
+            queue.appendleft((json.loads(json.dumps(value, allow_nan=False)), float(timestamp)))
+            cutoff = now - max(1, retention_seconds)
+            retained = sorted(((item, score) for item, score in queue if score >= cutoff), key=lambda pair: pair[1], reverse=True)
+            retained = retained[:max(1, max_length)]
+            queue.clear()
+            queue.extend(retained)
 
     async def get_timed_list_json(self, key: str, *, limit: int = 100, retention_seconds: int = 7200) -> list[Any]:
         now = time.time()
@@ -199,20 +205,42 @@ class RedisJsonCache:
         return [json.loads(value) for value in values]
 
     async def append_timed_json(self, key: str, value: Any, *, timestamp: float, max_length: int, retention_seconds: int) -> None:
-        # Redis sorted sets provide both retention-by-time and a hard length cap without
-        # rereading up to 200k liquidations on every incoming event.
-        raw = json.dumps(value, allow_nan=False, separators=(",", ":"))
-        member = f"{float(timestamp):.6f}|{uuid.uuid4().hex}|{raw}"
-        client = self._client
-        pipe = client.pipeline(transaction=True)
-        cutoff = time.time() - max(1, retention_seconds)
-        pipe.zadd(key, {member: float(timestamp)})
-        pipe.zremrangebyscore(key, "-inf", cutoff)
-        pipe.expire(key, max(60, retention_seconds * 2))
+        await self.append_timed_json_many([(key, value, timestamp, max_length, retention_seconds)])
+
+    async def append_timed_json_many(self, entries: list[tuple[str, Any, float, int, int]]) -> None:
+        """Append samples for many symbols in one Redis round trip.
+
+        The old worker did a Redis history read for every symbol on every ticker
+        frame. This batch path keeps sample writes bounded and removes per-symbol
+        serial network waits from the hot market-data loop.
+        """
+        if not entries:
+            return
+        script = """
+        local key = KEYS[1]
+        local score = tonumber(ARGV[1])
+        local member = ARGV[2]
+        local cutoff = tonumber(ARGV[3])
+        local ttl = tonumber(ARGV[4])
+        local maxlen = tonumber(ARGV[5])
+        redis.call('ZADD', key, score, member)
+        redis.call('ZREMRANGEBYSCORE', key, '-inf', cutoff)
+        redis.call('EXPIRE', key, ttl)
+        local size = redis.call('ZCARD', key)
+        if size > maxlen then
+          redis.call('ZREMRANGEBYRANK', key, 0, size - maxlen - 1)
+        end
+        return 1
+        """
+        now = time.time()
+        pipe = self._client.pipeline(transaction=False)
+        for key, value, timestamp, max_length, retention_seconds in entries:
+            retention = max(1, int(retention_seconds))
+            raw = json.dumps(value, allow_nan=False, separators=(",", ":"))
+            member = f"{float(timestamp):.6f}|{uuid.uuid4().hex}|{raw}"
+            cutoff = now - retention
+            pipe.eval(script, 1, key, float(timestamp), member, cutoff, max(60, retention * 2), max(1, int(max_length)))
         await pipe.execute()
-        size = int(await client.zcard(key))
-        if size > max_length:
-            await client.zremrangebyrank(key, 0, size - max_length - 1)
 
     async def get_timed_list_json(self, key: str, *, limit: int = 100, retention_seconds: int = 7200) -> list[Any]:
         if limit <= 0:
