@@ -154,8 +154,9 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
                 if not isinstance(row, dict) or not row.get("symbol"):
                     continue
                 symbol = str(row["symbol"]).upper()
-                if now - last_ticks.get(symbol, 0.0) < 1.0:
-                    continue
+                # The worker already emits a market snapshot on Binance's cadence.
+                # Do not apply a second per-symbol throttle here: it can discard the
+                # newest tick when upstream messages arrive close together.
                 last_ticks[symbol] = now
                 frames.append({"channel": "prices", "event": "tick", "payload": {
                     "symbol": symbol, "price": row.get("price"), "change_pct": row.get("change_pct"),
@@ -262,17 +263,48 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=500)
     tasks: list[asyncio.Task] = []
 
+    def enqueue_event(channel: str, item: Any) -> None:
+        """Keep market prices latest-wins so a slow client does not replay stale ticks."""
+        is_price_snapshot = (
+            channel == "market:events"
+            and isinstance(item, dict)
+            and item.get("event") == "price.update"
+        )
+        if is_price_snapshot:
+            # A price.update contains a whole snapshot of changed symbols. If an older
+            # snapshot is still waiting, replace it instead of building a stale backlog.
+            pending: list[tuple[str, Any]] = []
+            while True:
+                try:
+                    queued = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                old_channel, old_item = queued
+                old_is_price_snapshot = (
+                    old_channel == "market:events"
+                    and isinstance(old_item, dict)
+                    and old_item.get("event") == "price.update"
+                )
+                if not old_is_price_snapshot:
+                    pending.append(queued)
+            for queued in pending:
+                queue.put_nowait(queued)
+
+        if queue.full():
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        try:
+            queue.put_nowait((channel, item))
+        except asyncio.QueueFull:
+            # Defensive only; this function does not await, so no other task can
+            # change the queue between the fullness check and put_nowait.
+            logger.warning("Se descartó un evento WebSocket porque la cola está llena (%s)", channel)
+
     async def pump(channel: str) -> None:
         async for item in cache.subscribe_json(channel):
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            try:
-                queue.put_nowait((channel, item))
-            except asyncio.QueueFull:
-                pass
+            enqueue_event(channel, item)
 
     try:
         for channel in EVENT_CHANNELS:
