@@ -258,3 +258,62 @@ def test_stale_cache_is_used_when_rest_fails_and_is_marked_degraded():
     assert response.headers["x-ftrade-market-status"] == "degraded"
     assert response.headers["x-ftrade-market-source"] == "cache"
     assert response.json()[0]["symbol"] == "ETHUSDT"
+
+
+def test_live_feed_does_not_read_redis_history_for_every_ticker_frame():
+    class CountingCache(InMemoryJsonCache):
+        def __init__(self):
+            super().__init__()
+            self.history_reads = 0
+            self.history_batches = []
+
+        async def get_timed_list_json(self, key, *, limit=100, retention_seconds=7200):
+            self.history_reads += 1
+            return await super().get_timed_list_json(key, limit=limit, retention_seconds=retention_seconds)
+
+        async def append_timed_json_many(self, entries):
+            self.history_batches.append(len(entries))
+            return await super().append_timed_json_many(entries)
+
+    clock = [time.time()]
+    cache = CountingCache()
+    worker = MarketFeedWorker(cache, clock=lambda: clock[0])
+    worker.connected = True
+
+    def tick(price):
+        return {"stream": "!miniTicker@arr", "data": [
+            {"e": "24hrMiniTicker", "s": "BTCUSDT", "c": str(price), "o": "100", "h": str(price), "l": "99", "q": "900000", "st": 1},
+            {"e": "24hrMiniTicker", "s": "ETHUSDT", "c": str(price * 10), "o": "1000", "h": str(price * 10), "l": "990", "q": "500000", "st": 1},
+        ]}
+
+    run(worker.process_message(tick(101)))
+    assert cache.history_batches == [2]
+    assert cache.history_reads == 0
+
+    # A fresh market frame one second later updates prices but does not issue a
+    # Redis ZSET history read or write for either symbol.
+    clock[0] += 1
+    run(worker.process_message(tick(102)))
+    assert cache.history_batches == [2]
+    assert cache.history_reads == 0
+    quotes = run(cache.get_json(QUOTES_KEY))
+    assert quotes["BTCUSDT"]["price"] == 102
+
+
+def test_quote_health_uses_price_tick_age_not_only_auxiliary_websocket_messages():
+    now = time.time()
+    cache = InMemoryJsonCache()
+    run(cache.set_json(FEED_STATUS_KEY, {
+        "connected": True,
+        "source": "websocket",
+        "status": "healthy",
+        "last_message_epoch": now,
+        "last_price_update_epoch": now - 20,
+        "last_message_at": "2026-10-26T00:55:00Z",
+        "last_price_update_at": "2026-10-26T00:54:40Z",
+    }, ttl_seconds=100))
+    service = MarketDataService(cache, FakeRest(), clock=lambda: now)
+    health = run(service.feed_status())
+    assert health.status == "degraded"
+    assert health.source == "cache"
+    assert health.stale_seconds == 20
