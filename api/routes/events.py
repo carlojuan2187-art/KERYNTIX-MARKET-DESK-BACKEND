@@ -15,6 +15,7 @@ from fastapi.encoders import jsonable_encoder
 
 from api.security import Principal, current_principal
 from domain.plans import evaluate_access
+from api.services.auth import is_admin_user, is_admin_id
 
 router = APIRouter(tags=["realtime-events"])
 logger = logging.getLogger("ftrade.events")
@@ -34,8 +35,8 @@ def _ticket_key(ticket: str) -> str:
     return "ws:ticket:v1:" + hashlib.sha256(ticket.encode("utf-8")).hexdigest()
 
 
-def _is_admin(user_id: str) -> bool:
-    return str(user_id) in {x.strip() for x in os.getenv("ADMIN_USER_IDS", "").split(",") if x.strip()}
+def _is_admin(user_id: str, user: Mapping[str, Any] | None = None) -> bool:
+    return is_admin_user(user) if user is not None else is_admin_id(str(user_id))
 
 
 def _session_is_active(auth_repo: Any, session_id: str | None, user_id: str) -> bool:
@@ -233,7 +234,7 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
         await websocket.close(code=4401, reason="Cuenta inexistente")
         return
 
-    admin = _is_admin(user_id)
+    admin = _is_admin(user_id, user)
     access = evaluate_access(user, now=datetime.now(timezone.utc), is_admin=admin)
     can_view_market = bool(access.get("allowed"))
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=500)
@@ -269,7 +270,7 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
                 if not current_user:
                     await websocket.close(code=4401, reason="Cuenta inexistente")
                     return
-                can_view_market = bool(evaluate_access(current_user, now=datetime.now(timezone.utc), is_admin=_is_admin(user_id)).get("allowed"))
+                can_view_market = bool(evaluate_access(current_user, now=datetime.now(timezone.utc), is_admin=_is_admin(user_id, current_user)).get("allowed"))
                 frames = await _event_frames(websocket, source, item, user_id, can_view_market, last_ticks)
                 for frame in frames:
                     await websocket.send_json(frame)
