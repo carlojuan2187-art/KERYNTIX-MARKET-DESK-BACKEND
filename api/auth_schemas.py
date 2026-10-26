@@ -101,7 +101,7 @@ class UserResponse(BaseModel):
     ref_premium_valid: bool = False
     exchange: str | None = None
     risk_profile: dict[str, float]
-    watchlist: list[dict[str, Any]] = Field(default_factory=list, max_length=10)
+    watchlist: list[str] = Field(default_factory=list, max_length=10)
     alert_prefs: dict[str, bool]
     tz: str
     banned: bool = False
