@@ -20,6 +20,7 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from domain.plans import evaluate_access
+from api.services.auth import is_admin_user, is_admin_id
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -128,7 +129,6 @@ def current_principal(request: Request, credentials: HTTPAuthorizationCredential
             raise HTTPException(status_code=503, detail={"code": "SESSION_STORE_UNAVAILABLE", "message": "No se pudo validar la sesión con el servicio de cuentas."}) from exc
         if not user:
             raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "La cuenta no existe."})
-        admin_ids = {item.strip() for item in os.getenv("ADMIN_USER_IDS", "").split(",") if item.strip()}
         claims = dict(principal.claims)
         claims.update({
             "plan": str(user.get("plan", "free")),
@@ -139,12 +139,12 @@ def current_principal(request: Request, credentials: HTTPAuthorizationCredential
             "ban_reason": user.get("ban_reason"),
             "tz": str(user.get("tz") or "America/Havana"),
         })
-        principal = Principal(user_id=principal.user_id, claims=claims, is_admin=principal.user_id in admin_ids)
+        principal = Principal(user_id=principal.user_id, claims=claims, is_admin=is_admin_user(user))
     elif os.getenv("FTRADE_ENV", "development").strip().lower() == "production":
         # On production, admin privileges never come from client-controlled claims;
-        # only ADMIN_USER_IDS on the server can grant them.
-        admin_ids = {item.strip() for item in os.getenv("ADMIN_USER_IDS", "").split(",") if item.strip()}
-        principal = Principal(user_id=principal.user_id, claims=principal.claims, is_admin=principal.user_id in admin_ids)
+        # only server-side ADMIN_USER_IDS / ADMIN_PHONE_NUMBERS can grant them.
+        principal = Principal(user_id=principal.user_id, claims=principal.claims,
+                              is_admin=is_admin_id(principal.user_id))
     return principal
 
 
