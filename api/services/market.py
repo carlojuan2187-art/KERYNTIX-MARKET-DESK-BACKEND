@@ -97,7 +97,12 @@ class MarketDataService:
 
     async def feed_status(self) -> MarketFeedHealth:
         raw = await self.cache.get_json(FEED_STATUS_KEY) or {}
-        last_update = raw.get("last_message_epoch", raw.get("last_price_update_epoch"))
+        # Quote freshness follows the last actual mini-ticker update, not just any
+        # WebSocket traffic (for example mark-price/funding frames can continue while
+        # the traded-price stream is stale).
+        last_update = raw.get("last_price_update_epoch")
+        if not isinstance(last_update, (int, float)):
+            last_update = raw.get("last_message_epoch")
         age = max(0.0, self.clock() - float(last_update)) if isinstance(last_update, (int, float)) else None
         connected = bool(raw.get("connected"))
         fresh = age is not None and age <= QUOTE_FRESH_SECONDS
