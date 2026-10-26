@@ -159,6 +159,10 @@ class MarketFeedWorker:
         self._movers_started_epoch: float | None = None
         self._liquidations_started_epoch: float | None = None
         self._liquidations_connection_count = 0
+        # Last sample timestamps are kept in-process so each ticker frame does not
+        # need a Redis history read for every symbol. The periodic write below is
+        # batched to avoid slowing down the live price feed.
+        self._last_history_sample_epoch: dict[str, float] = {}
 
     async def start(self) -> None:
         self._stop.clear()
@@ -232,6 +236,8 @@ class MarketFeedWorker:
             previous_map = await self.cache.get_json(QUOTES_KEY)
             quotes = dict(previous_map) if isinstance(previous_map, dict) else {}
             changed: list[dict[str, Any]] = []
+            history_samples: list[tuple[str, dict[str, Any], float, int, int]] = []
+            sampled_symbols: dict[str, float] = {}
             for ticker in tickers:
                 symbol = ticker["s"]
                 previous = quotes.get(symbol, {})
@@ -243,16 +249,19 @@ class MarketFeedWorker:
                 if not sparkline or sparkline[-1] != quote["price"]:
                     sparkline.append(quote["price"])
                 quote["sparkline"] = sparkline[-SPARKLINE_POINTS:]
-                # Keep the 65-minute, 15-second sample history required by the original
-                # MoversEngine; the short sparkline above is only for visual rendering.
-                history_key = f"market:price-history:v1:{symbol}"
-                history = await self.cache.get_timed_list_json(history_key, limit=1, retention_seconds=3900)
-                if not history or now - float(history[0].get("timestamp", 0)) >= 15.0:
-                    await self.cache.append_timed_json(
-                        history_key,
+                # Keep the 65-minute, 15-second sample history required by MoversEngine.
+                # Do not query Redis for every symbol on every frame: the all-market
+                # mini-ticker stream can contain hundreds of symbols, and sequential
+                # ZSET reads caused large processing lag. On first sight in this worker
+                # process we take a sample, then sample locally every 15 seconds.
+                last_sample = self._last_history_sample_epoch.get(symbol)
+                if last_sample is None or now - last_sample >= 15.0:
+                    history_samples.append((
+                        f"market:price-history:v1:{symbol}",
                         {"timestamp": now, "price": quote["price"], "volume_24h": quote["volume_24h"]},
-                        timestamp=now, max_length=300, retention_seconds=3900,
-                    )
+                        now, 300, 3900,
+                    ))
+                    sampled_symbols[symbol] = now
                 # Other real analytical modules can enrich these values later. Preserve them.
                 for key in ("funding_rate", "open_interest", "buy_pct", "volume_ratio", "score", "trend", "liquidity_sweep"):
                     if previous.get(key) is not None:
@@ -263,6 +272,16 @@ class MarketFeedWorker:
                     "volume_24h": quote["volume_24h"], "high_24h": quote["high_24h"],
                     "low_24h": quote["low_24h"],
                 })
+            if history_samples:
+                batch_append = getattr(self.cache, "append_timed_json_many", None)
+                if callable(batch_append):
+                    await batch_append(history_samples)
+                else:  # compatibility with external cache adapters
+                    await asyncio.gather(*(
+                        self.cache.append_timed_json(key, value, timestamp=stamp, max_length=max_len, retention_seconds=retention)
+                        for key, value, stamp, max_len, retention in history_samples
+                    ))
+                self._last_history_sample_epoch.update(sampled_symbols)
             if changed:
                 await self.cache.set_json(QUOTES_KEY, quotes, ttl_seconds=7200)
                 self.last_event_epoch = now
@@ -274,13 +293,25 @@ class MarketFeedWorker:
         if mark_updates:
             existing = await self.cache.get_json(FUNDING_KEY)
             funding_map = {str(row.get("symbol")): row for row in existing if isinstance(row, dict) and row.get("symbol")} if isinstance(existing, list) else {}
+            changed_funding: list[dict[str, Any]] = []
             for item in mark_updates:
-                funding_map[item["symbol"]] = item
+                symbol = item["symbol"]
+                previous_funding = funding_map.get(symbol)
+                previous_rate = _number(previous_funding.get("lastFundingRate")) if isinstance(previous_funding, dict) else None
+                current_rate = _number(item.get("lastFundingRate"))
+                # Mark price/index price update every second, but the rate usually does
+                # not. Keep the cache current while only broadcasting actual rate changes
+                # so a full-market mark stream does not flood every browser with hundreds
+                # of redundant WebSocket frames per second.
+                if current_rate is not None and previous_rate != current_rate:
+                    changed_funding.append(item)
+                funding_map[symbol] = item
             await self.cache.set_json(FUNDING_KEY, list(funding_map.values()), ttl_seconds=180)
             await self.cache.set_json(f"{FUNDING_KEY}:meta", {"updated_epoch": now, "updated_at": utc_iso(now)}, ttl_seconds=180)
-            await self.cache.publish_json("market:events", {
-                "channel": "market", "event": "funding.update", "payload": mark_updates, "ts": utc_iso(now),
-            })
+            if changed_funding:
+                await self.cache.publish_json("market:events", {
+                    "channel": "market", "event": "funding.update", "payload": changed_funding, "ts": utc_iso(now),
+                })
         if liquidations:
             for item in liquidations:
                 await self.cache.append_timed_json(
@@ -308,11 +339,14 @@ class MarketFeedWorker:
         now = self.clock()
         latest_price_epoch = last_price_epoch if last_price_epoch is not None else previous.get("last_price_update_epoch")
         latest_message_epoch = last_message_epoch if last_message_epoch is not None else previous.get("last_message_epoch")
-        fresh = isinstance(latest_message_epoch, (float, int)) and now - float(latest_message_epoch) <= WATCHDOG_SECONDS
+        # Mark-price/funding messages are not a substitute for a fresh traded price.
+        # Health must follow the actual quote stream, otherwise stale prices can be
+        # reported as healthy indefinitely while auxiliary streams keep flowing.
+        price_fresh = isinstance(latest_price_epoch, (float, int)) and now - float(latest_price_epoch) <= WATCHDOG_SECONDS
         value = {
             "connected": connected,
-            "source": "websocket" if latest_message_epoch is not None else "none",
-            "status": "healthy" if connected and fresh else "degraded",
+            "source": "websocket" if latest_price_epoch is not None else "none",
+            "status": "healthy" if connected and price_fresh else "degraded",
             "updated_at": utc_iso(now),
             "last_message_at": utc_iso(latest_message_epoch) if isinstance(latest_message_epoch, (float, int)) else None,
             "last_message_epoch": latest_message_epoch,
