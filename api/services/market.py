@@ -20,7 +20,7 @@ FEED_STATUS_KEY = "market:feed:status:v1"
 FUNDING_KEY = "market:funding:v1"
 QUOTE_FRESH_SECONDS = 15.0
 SYMBOL_RE = re.compile(r"^[A-Z0-9]{3,30}USDT$")
-INTERVALS = {"15m": "15m", "1h": "1h", "4h": "4h", "1D": "1d", "1d": "1d"}
+INTERVALS = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1h", "4h": "4h", "1D": "1d", "1d": "1d"}
 
 
 def utc_iso(timestamp: float | int | None = None) -> str:
