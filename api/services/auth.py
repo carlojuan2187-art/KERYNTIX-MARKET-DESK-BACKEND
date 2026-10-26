@@ -97,8 +97,46 @@ def _admin_ids() -> set[str]:
     return {item.strip() for item in os.getenv("ADMIN_USER_IDS", "").split(",") if item.strip()}
 
 
+def _normalize_admin_phone(value: Any) -> str:
+    """Normalize phone values to + followed by digits for environment matching."""
+    import re
+    digits = re.sub(r"\D", "", str(value or ""))
+    if not 8 <= len(digits) <= 15:
+        return ""
+    return "+" + digits
+
+
+def _admin_phone_numbers() -> set[str]:
+    return {
+        normalized
+        for item in os.getenv("ADMIN_PHONE_NUMBERS", "").split(",")
+        if (normalized := _normalize_admin_phone(item))
+    }
+
+
 def is_admin_id(user_id: str) -> bool:
+    """Legacy admin check by FTrade's internal user ID."""
     return str(user_id) in _admin_ids()
+
+
+def is_admin_user(user: Mapping[str, Any] | None) -> bool:
+    """Resolve admin access using a configured internal ID or verified account phone.
+
+    Phone-based administration is safe here because account.phone is populated only
+    after the phone + Telegram verification flow completes. This helper must receive
+    the persisted user record, not request-supplied phone data.
+    """
+    if not user:
+        return False
+    if is_admin_id(str(user.get("user_id", ""))):
+        return True
+    configured_phones = _admin_phone_numbers()
+    user_phone = _normalize_admin_phone(user.get("phone"))
+    return bool(user_phone and user_phone in configured_phones)
+
+
+def admin_configured() -> bool:
+    return bool(_admin_ids() or _admin_phone_numbers())
 
 
 def issue_access_token(user: Mapping[str, Any], session_id: str, *, now: datetime | None = None) -> str:
@@ -112,7 +150,7 @@ def issue_access_token(user: Mapping[str, Any], session_id: str, *, now: datetim
         "jti": secrets.token_urlsafe(12),
         "iat": iat,
         "exp": iat + max_ttl,
-        "is_admin": is_admin_id(str(user["user_id"])),
+        "is_admin": is_admin_user(user),
         "plan": str(user.get("plan", "free")),
         "trial_end": iso_utc(as_utc(user.get("trial_end"))),
         "plan_end": iso_utc(as_utc(user.get("plan_end"))),
@@ -138,7 +176,7 @@ def _normalize_user_for_response(user: Mapping[str, Any]) -> dict[str, Any]:
     result.pop("_id", None)
     for key in ("created_at", "last_activity", "trial_end", "plan_end", "ban_until", "banned_at"):
         result[key] = iso_utc(as_utc(result.get(key))) if result.get(key) is not None else None
-    result["is_admin"] = is_admin_id(str(result.get("user_id", "")))
+    result["is_admin"] = is_admin_user(user)
     # Avoid exposing internal moderation note storage under a public profile key.
     result.pop("ban_reason", None)
     return result
@@ -398,7 +436,7 @@ class AuthService:
         user = self.repository.get_user_by_id(user_id)
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
-        access = evaluate_access(user, now=utcnow(), is_admin=is_admin_id(str(user_id)))
+        access = evaluate_access(user, now=utcnow(), is_admin=is_admin_user(user))
         if access["status"] == "banned":
             reason = user.get("ban_reason") or "Cuenta bloqueada por administración."
         elif access["status"] == "expired":

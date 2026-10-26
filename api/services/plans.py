@@ -10,7 +10,7 @@ from typing import Any, Mapping
 from fastapi import HTTPException
 
 from api.repositories.auth import AuthRepository
-from api.services.auth import is_admin_id
+from api.services.auth import is_admin_user
 from api.services.telegram import TelegramBotAPI
 from domain.plans import as_utc, evaluate_access, iso_utc
 
@@ -34,7 +34,7 @@ class PlanService:
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
         current = as_utc(now or _now()) or _now()
-        access = evaluate_access(user, now=current, is_admin=is_admin_id(str(user_id)))
+        access = evaluate_access(user, now=current, is_admin=is_admin_user(user))
         end = as_utc(user.get("plan_end")) if access["premium_active"] else as_utc(user.get("trial_end")) if access["trial_active"] else None
         seconds_left = max(0, int((end - current).total_seconds())) if end else None
         return {

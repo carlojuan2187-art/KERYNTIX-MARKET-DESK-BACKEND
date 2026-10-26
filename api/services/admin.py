@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from api.repositories.auth import AuthRepository
-from api.services.auth import is_admin_id
+from api.services.auth import is_admin_user
 from api.services.plans import PlanService
 
 UTC = timezone.utc
@@ -35,7 +35,7 @@ def public_user(user: dict[str, Any]) -> dict[str, Any]:
     for key in ("created_at", "last_activity", "trial_end", "plan_end", "ban_until", "banned_at", "plan_updated_at"):
         if key in result:
             result[key] = _iso(result.get(key))
-    result["is_admin"] = is_admin_id(str(result.get("user_id", "")))
+    result["is_admin"] = is_admin_user(user)
     return result
 
 
@@ -70,8 +70,6 @@ class AdminService:
 
     def ban_user(self, user_id: str, actor_id: str, *, days: int | None, reason: str) -> dict[str, Any]:
         user_id, actor_id = str(user_id), str(actor_id)
-        if user_id == actor_id or is_admin_id(user_id):
-            raise HTTPException(status_code=409, detail={"code": "ADMIN_CANNOT_BE_BANNED", "message": "No se puede banear a esta cuenta de administración."})
         reason = reason.strip()
         if not 5 <= len(reason) <= 500:
             raise HTTPException(status_code=422, detail={"code": "INVALID_REASON", "message": "Indica una razón de 5 a 500 caracteres."})
@@ -81,6 +79,8 @@ class AdminService:
         user = self.auth_repository.get_user_by_id(user_id)
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
+        if user_id == actor_id or is_admin_user(user):
+            raise HTTPException(status_code=409, detail={"code": "ADMIN_CANNOT_BE_BANNED", "message": "No se puede banear a esta cuenta de administración."})
         until = current + timedelta(days=days) if days is not None else None
         updated = self.auth_repository.update_user(user_id, {"banned": True, "ban_until": until, "banned_at": current, "banned_by": actor_id, "ban_reason": reason, "updated_at": current})
         self.repository.write_audit({"event_id": uuid.uuid4().hex, "actor_id": actor_id, "action": "user_ban", "target_user_id": user_id, "details": {"days": days, "reason": reason, "ban_until": _iso(until)}, "created_at": current})
@@ -89,8 +89,6 @@ class AdminService:
     def ban_user_until(self, user_id: str, actor_id: str, *, until: datetime | None, reason: str) -> dict[str, Any]:
         """Apply the exact UTC expiry supplied by the API contract; None means permanent."""
         user_id, actor_id = str(user_id), str(actor_id)
-        if user_id == actor_id or is_admin_id(user_id):
-            raise HTTPException(status_code=409, detail={"code": "ADMIN_CANNOT_BE_BANNED", "message": "No se puede banear a esta cuenta de administración."})
         reason = reason.strip()
         if not 5 <= len(reason) <= 500:
             raise HTTPException(status_code=422, detail={"code": "INVALID_REASON", "message": "Indica una razón de 5 a 500 caracteres."})
@@ -104,6 +102,8 @@ class AdminService:
         user = self.auth_repository.get_user_by_id(user_id)
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
+        if user_id == actor_id or is_admin_user(user):
+            raise HTTPException(status_code=409, detail={"code": "ADMIN_CANNOT_BE_BANNED", "message": "No se puede banear a esta cuenta de administración."})
         updated = self.auth_repository.update_user(user_id, {"banned": True, "ban_until": normalized_until,
             "banned_at": current, "banned_by": actor_id, "ban_reason": reason, "updated_at": current})
         self.repository.write_audit({"event_id": uuid.uuid4().hex, "actor_id": actor_id, "action": "user_ban", "target_user_id": user_id,
@@ -117,6 +117,8 @@ class AdminService:
         user = self.auth_repository.get_user_by_id(user_id)
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
+        if user_id == actor_id or is_admin_user(user):
+            raise HTTPException(status_code=409, detail={"code": "ADMIN_CANNOT_BE_BANNED", "message": "No se puede banear a esta cuenta de administración."})
         now = _now()
         updated = self.auth_repository.update_user(user_id, {"banned": False, "ban_until": None, "unbanned_at": now, "unbanned_by": actor_id, "unban_reason": reason, "updated_at": now})
         self.repository.write_audit({"event_id": uuid.uuid4().hex, "actor_id": actor_id, "action": "user_unban", "target_user_id": user_id, "details": {"reason": reason}, "created_at": now})
