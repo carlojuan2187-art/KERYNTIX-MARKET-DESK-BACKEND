@@ -97,6 +97,33 @@ def test_phone_telegram_code_creates_free_trial_user_and_httponly_refresh(monkey
         assert len(sessions.json()) == 1 and sessions.json()[0]["current"] is True
 
 
+def test_verify_existing_user_with_symbol_watchlist_returns_success(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    with TestClient(app) as client:
+        _token, code = challenge_and_link(client, repo)
+        first_login = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        assert first_login.status_code == 200, first_login.text
+        user_id = first_login.json()["user"]["user_id"]
+
+        # Persist the same shape used by the repository in production: symbol strings.
+        repo.update_user(user_id, {"watchlist": ["BTCUSDT"]})
+
+        # Expire the prior request's cooldown to model a later login attempt.
+        from datetime import datetime, timezone
+        previous = repo.get_latest_login_request_for_phone("+17875551234")
+        repo.update_auth_request(
+            str(previous["token_hash"]),
+            {"created_at": datetime.now(timezone.utc) - timedelta(seconds=61)},
+        )
+
+        # Existing-account login must serialize without a response-validation error.
+        _token, code = challenge_and_link(client, repo)
+        login = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        assert login.status_code == 200, login.text
+        assert login.json()["is_new"] is False
+        assert login.json()["user"]["watchlist"] == ["BTCUSDT"]
+
+
 def test_production_refresh_cookie_allows_cross_origin_frontend(monkeypatch):
     app, repo, _telegram = configured(monkeypatch)
     monkeypatch.setenv("FTRADE_ENV", "production")
