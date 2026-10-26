@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from urllib.parse import quote
 from datetime import datetime, timezone
 from typing import Any
 
@@ -130,8 +131,15 @@ class ReferralService:
         if not user:
             raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
         ref_code = str(user.get("ref_code") or f"ref_{user_id}")
-        username = os.getenv("TELEGRAM_AUTH_BOT_USERNAME", "").strip().lstrip("@")
-        link = f"https://t.me/{username}?start={ref_code}" if username else None
+        # Referral links must land on the public web app, not in the Telegram bot.
+        # FRONTEND_URL can be customized per deployment; use the production web
+        # domain as a safe default for the current Railway deployment.
+        frontend_url = (
+            os.getenv("FRONTEND_URL")
+            or os.getenv("PUBLIC_FRONTEND_URL")
+            or "https://ftrade-web-production.up.railway.app"
+        ).strip().rstrip("/")
+        link = f"{frontend_url}/r/{quote(ref_code, safe='')}"
         total_referred = self.auth_repository.count_referred_users(str(user_id))
         records = self.repository.list_referrals(str(user_id))
         premium = [r for r in records if str(r.get("activated_plan", "")).lower() == "premium"]

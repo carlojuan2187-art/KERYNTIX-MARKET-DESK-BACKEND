@@ -420,14 +420,19 @@ class AuthService:
         production = os.getenv("FTRADE_ENV", "development").lower() == "production"
         secure = True if production else (secure_setting.lower() == "true" if secure_setting is not None else False)
         max_age = int(max(0, (expires_at - utcnow()).total_seconds())) if expires_at else REFRESH_DAYS * 86400
-        response.set_cookie(ACCESS_COOKIE_NAME, token, max_age=max_age, httponly=True, secure=secure, samesite="lax", path="/auth")
+        # The frontend and API use different Railway hosts. In production the
+        # refresh cookie must be allowed on cross-origin fetches, so SameSite=None
+        # is required together with Secure. Local development keeps Lax.
+        same_site = "none" if production else "lax"
+        response.set_cookie(ACCESS_COOKIE_NAME, token, max_age=max_age, httponly=True, secure=secure, samesite=same_site, path="/auth")
 
     @staticmethod
     def clear_refresh_cookie(response: Response) -> None:
         secure_setting = os.getenv("AUTH_COOKIE_SECURE")
         production = os.getenv("FTRADE_ENV", "development").lower() == "production"
         secure = True if production else (secure_setting.lower() == "true" if secure_setting is not None else False)
-        response.delete_cookie(ACCESS_COOKIE_NAME, path="/auth", httponly=True, secure=secure, samesite="lax")
+        same_site = "none" if production else "lax"
+        response.delete_cookie(ACCESS_COOKIE_NAME, path="/auth", httponly=True, secure=secure, samesite=same_site)
 
     def logout(self, token: str | None) -> bool:
         if not token:
