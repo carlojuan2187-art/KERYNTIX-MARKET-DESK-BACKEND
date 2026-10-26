@@ -35,3 +35,15 @@ def test_funding_updates_are_forwarded_as_live_price_channel_frames():
     assert frames[0]["event"] == "funding.tick"
     assert frames[0]["payload"]["symbol"] == "BTCUSDT"
     assert frames[0]["payload"]["funding_rate"] == 0.0001
+
+
+def test_price_events_are_not_throttled_a_second_time_per_symbol():
+    # The browser transport must not discard a new price just because a prior tick
+    # for the same symbol was forwarded less than one second ago.
+    last_ticks = {"BTCUSDT": 999999999.0}
+    payload = [{"symbol": "BTCUSDT", "price": 68002.0}]
+    frames = run(_event_frames(None, "market:events", {
+        "event": "price.update", "payload": payload, "ts": "2026-10-26T12:00:00Z",
+    }, "user-1", True, last_ticks))
+    assert len(frames) == 1
+    assert frames[0]["payload"]["price"] == 68002.0
