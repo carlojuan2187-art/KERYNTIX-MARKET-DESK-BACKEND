@@ -109,7 +109,13 @@ class MongoSignalRepository:
         self._collection = collection
         self._client = client
         self._database_name = database_name
-        self._results_collection = results_collection or client[database_name][os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")]
+        self._results_collection = (
+            results_collection
+            if results_collection is not None
+            else client[database_name][
+                os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")
+            ]
+        )
 
     @classmethod
     def from_env(cls) -> "MongoSignalRepository":
