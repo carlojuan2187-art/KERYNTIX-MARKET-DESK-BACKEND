@@ -207,10 +207,16 @@ def test_candles_endpoint_cvd_timezone_and_contract_shape():
     app.dependency_overrides[require_analytical_access] = lambda: principal
     with TestClient(app) as client:
         response = client.get("/market/candles?symbol=BTCUSDT&timeframe=1m&tz=UTC")
+        five_minute = client.get("/market/candles?symbol=BTCUSDT&timeframe=5m&tz=UTC")
         invalid_tf = client.get("/market/candles?symbol=BTCUSDT&timeframe=1w")
         valid = client.get("/market/candles?symbol=BTCUSDT&timeframe=1h&tz=UTC")
+    assert response.status_code == 200
+    assert five_minute.status_code == 200
     assert invalid_tf.status_code == 422
     assert valid.status_code == 200
+    assert ("klines", "BTCUSDT", "1m", 120) in rest.calls
+    assert ("klines", "BTCUSDT", "5m", 120) in rest.calls
+    assert ("klines", "BTCUSDT", "1h", 120) in rest.calls
     data = valid.json()
     assert len(data) == 2
     assert [c["timestamp"] for c in data] == sorted(c["timestamp"] for c in data)
