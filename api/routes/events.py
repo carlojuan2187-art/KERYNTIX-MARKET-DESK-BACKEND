@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import secrets
 import time
@@ -157,7 +158,28 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
                     continue
                 last_ticks[symbol] = now
                 frames.append({"channel": "prices", "event": "tick", "payload": {
-                    "symbol": symbol, "price": row.get("price"), "change_pct": row.get("change_pct")
+                    "symbol": symbol, "price": row.get("price"), "change_pct": row.get("change_pct"),
+                    "volume_24h": row.get("volume_24h"), "high_24h": row.get("high_24h"),
+                    "low_24h": row.get("low_24h"),
+                }, "ts": value.get("ts") or now_iso})
+            return frames
+        if event == "funding.update" and isinstance(payload, list):
+            frames = []
+            for row in payload:
+                if not isinstance(row, dict) or not row.get("symbol"):
+                    continue
+                symbol = str(row["symbol"]).upper()
+                rate = row.get("lastFundingRate")
+                if not isinstance(rate, (int, float)):
+                    try:
+                        rate = float(rate)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                if not math.isfinite(float(rate)):
+                    continue
+                frames.append({"channel": "prices", "event": "funding.tick", "payload": {
+                    "symbol": symbol, "funding_rate": float(rate), "mark_price": row.get("markPrice"),
+                    "index_price": row.get("indexPrice"), "next_funding_time": row.get("nextFundingTime"),
                 }, "ts": value.get("ts") or now_iso})
             return frames
         if event == "liquidation.new":
