@@ -97,6 +97,19 @@ def test_phone_telegram_code_creates_free_trial_user_and_httponly_refresh(monkey
         assert len(sessions.json()) == 1 and sessions.json()[0]["current"] is True
 
 
+def test_production_refresh_cookie_allows_cross_origin_frontend(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    monkeypatch.setenv("FTRADE_ENV", "production")
+    with TestClient(app) as client:
+        _token, code = challenge_and_link(client, repo)
+        response = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        assert response.status_code == 200, response.text
+        cookie = response.headers["set-cookie"].lower()
+        assert "samesite=none" in cookie
+        assert "secure" in cookie
+        assert "httponly" in cookie
+
+
 def test_patch_me_allows_only_preferences_and_rejects_bad_timezone(monkeypatch):
     app, repo, _telegram = configured(monkeypatch)
     with TestClient(app) as client:

@@ -349,3 +349,17 @@ def test_stale_payment_verification_lease_can_be_reclaimed(monkeypatch):
                                                     lease_until=now + timedelta(seconds=90), sender=SENDER)
     assert reclaimed is not None and reclaimed["attempts"] == 2
     assert reclaimed["status"] == "verifying"
+
+
+def test_referral_summary_links_to_frontend_registration_page(monkeypatch):
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-referral-links")
+    monkeypatch.setenv("FRONTEND_URL", "https://ftrade-web-production.up.railway.app/")
+    auth_repo = InMemoryAuthRepository()
+    biz_repo = InMemoryBusinessRepository()
+    put_user(auth_repo, "usr_referral_link")
+    service = ReferralService(auth_repo, biz_repo, PlanService(auth_repo))
+
+    summary = service.summary("usr_referral_link")
+
+    assert summary["referral_link"] == "https://ftrade-web-production.up.railway.app/r/ref_usr_referral_link"
+    assert "t.me/" not in summary["referral_link"]
