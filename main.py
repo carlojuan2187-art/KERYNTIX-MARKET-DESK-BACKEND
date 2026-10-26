@@ -110,7 +110,9 @@ def _production_configuration_issues() -> list[str]:
             issues.append("ACCESS_TOKEN_MAX_TTL_OUT_OF_RANGE")
     except (TypeError, ValueError):
         issues.append("ACCESS_TOKEN_MAX_TTL_INVALID")
-    if not {part.strip() for part in os.getenv("ADMIN_USER_IDS", "").split(",") if part.strip()}:
+    admin_ids = {part.strip() for part in os.getenv("ADMIN_USER_IDS", "").split(",") if part.strip()}
+    admin_phones = {part.strip() for part in os.getenv("ADMIN_PHONE_NUMBERS", "").split(",") if part.strip()}
+    if not admin_ids and not admin_phones:
         issues.append("ADMIN_USER_IDS_EMPTY")
 
     try:

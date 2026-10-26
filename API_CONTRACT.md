@@ -16,7 +16,7 @@ Modo maqueta: el acceso Premium/admin inicial y el código `123456` son únicame
 
 Error común: `{ code: string, message: string, details?: object }`. Todas las rutas autenticadas pueden responder `401 UNAUTHENTICATED`, `403 BANNED`, `429 TOO_MANY_REQUESTS` o `500 INTERNAL_ERROR`. Las rutas de análisis añaden `403 ACCESS_EXPIRED`; las administrativas, `403 ADMIN_REQUIRED`. `403 BANNED` incluye `reason` y `ban_until` cuando corresponda.
 
-Regla canónica de acceso: el servidor evalúa `domain/plans.py` con el registro actual y el momento actual en UTC: administrador desde `ADMIN_USER_IDS`; si no, baneo permanente o temporal aún vigente bloquea; de lo contrario, Premium vigente o prueba vigente permite análisis. Un baneo temporal deja de ser efectivo cuando `ban_until` queda atrás aunque `banned=true` siga guardado. `/account/plan` y `/account/entitlements` permiten al usuario consultar cómo recuperar acceso tras vencer; los endpoints analíticos siguen bloqueados. La pantalla de bloqueo es global.
+Regla canónica de acceso: el servidor evalúa `domain/plans.py` con el registro actual y el momento actual en UTC: administrador desde `ADMIN_USER_IDS` o mediante el teléfono verificado configurado en `ADMIN_PHONE_NUMBERS`; si no, baneo permanente o temporal aún vigente bloquea; de lo contrario, Premium vigente o prueba vigente permite análisis. Un baneo temporal deja de ser efectivo cuando `ban_until` queda atrás aunque `banned=true` siga guardado. `/account/plan` y `/account/entitlements` permiten al usuario consultar cómo recuperar acceso tras vencer; los endpoints analíticos siguen bloqueados. La pantalla de bloqueo es global.
 
 ## Endpoints
 

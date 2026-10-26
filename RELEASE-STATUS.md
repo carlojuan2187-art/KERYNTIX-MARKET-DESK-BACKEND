@@ -1,5 +1,13 @@
 # Estado de consolidación FTrade — 25 de octubre de 2026
 
+## Actualización — administración mediante teléfono verificado (26 de octubre de 2026)
+
+- Se añadió `ADMIN_PHONE_NUMBERS` como alternativa sencilla a `ADMIN_USER_IDS`. Acepta uno o varios teléfonos internacionales, separados por comas.
+- El backend compara esos números únicamente con el teléfono persistido y verificado de la cuenta; se aplica al perfil, token/sesión, permisos del panel administrativo, acceso a planes y workers.
+- `ADMIN_USER_IDS` sigue funcionando para mantener compatibilidad con despliegues actuales.
+- Prueba específica: el endpoint `/admin/summary` autoriza a la cuenta cuyo teléfono coincide con `ADMIN_PHONE_NUMBERS`, sin configurar `ADMIN_USER_IDS`.
+- Suite actual en esta copia: **307 passed, 5 skipped** al excluir `test/test_ported_test_radar.py`. La ejecución sin excluirlo no completa la colección por un import preexistente de `tests.test_ported_test_regime` (la carpeta disponible en este repositorio se llama `test`). No se atribuye ese problema a este cambio.
+
 ## Validación ejecutada en esta sesión
 
 ### Backend
