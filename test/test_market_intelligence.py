@@ -130,8 +130,26 @@ def test_radar_service_returns_auditable_source_and_caches_result():
     assert data["source"] == "binance-futures-klines-and-observed-sweeps"
     assert data["status"] in {"ok", "partial", "degraded"}
     assert "watch" in data and "sweeps" in data and "movers" in data
+    trends = data["timeframe_trends"]["BTCUSDT"]
+    assert trends["15M"] in {"up", "down", "range", "transition", "volatile"}
+    assert trends["1H"] in {"up", "down", "range", "transition", "volatile"}
+    assert trends["4H"] in {"up", "down", "range", "transition", "volatile"}
     assert len(rest.calls) == count
     assert again["updated_at"] == data["updated_at"]
+
+
+def test_timeframe_trends_for_unscanned_symbol_are_real_and_cached():
+    cache = InMemoryJsonCache()
+    rest = FakeRest()
+    service = MarketIntelligenceService(cache, rest, InMemorySignalRepository([]), InMemorySweepStore())
+
+    first = run(service.timeframe_trends_for_symbols(["ETHUSDT"]))
+    assert set(first["ETHUSDT"]) == {"15M", "1H", "4H"}
+    assert all(value in {"up", "down", "range", "transition", "volatile"} for value in first["ETHUSDT"].values())
+    count = len(rest.calls)
+    second = run(service.timeframe_trends_for_symbols(["ETHUSDT"]))
+    assert second == first
+    assert len(rest.calls) == count
 
 
 def test_overview_uses_shared_snapshots_and_counts_signal_statuses():
@@ -190,5 +208,9 @@ def test_new_intelligence_routes_enforce_windows_and_return_expected_shapes():
     assert overview.status_code == 200
     assert radar.status_code == 200 and "setups" in radar.json()
     assert radar.json()["setups"][0]["symbol"] == "BTCUSDT"
+    timeframe_trends = radar.json()["timeframe_trends"]["BTCUSDT"]
+    assert timeframe_trends["15M"] is not None
+    assert timeframe_trends["1H"] is not None
+    assert timeframe_trends["4H"] is not None
     assert movers.status_code == 200 and movers.json()["status"] == "collecting"
     assert lq.status_code == 200 and "total" in lq.json()
