@@ -67,6 +67,30 @@ async def get_market_flow(request: Request, response: Response,
     return data
 
 
+@router.get("/market/orderbook")
+async def get_market_order_book(
+    request: Request,
+    response: Response,
+    symbol: str = Query(default="BTCUSDT", min_length=6, max_length=24),
+    limit: int = Query(default=20),
+    _principal: Principal = Depends(require_analytical_access),
+) -> dict:
+    if limit not in (5, 10, 20, 50, 100):
+        raise HTTPException(status_code=422, detail={
+            "code": "INVALID_ORDER_BOOK_LIMIT", "message": "limit debe ser 5, 10, 20, 50 o 100 niveles."})
+    try:
+        data = await request.app.state.analytics_service.order_book(symbol, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={
+            "code": "INVALID_SYMBOL", "message": "El símbolo debe ser un par válido de Binance USDT-M Futures."}) from exc
+    except AnalyticsUnavailable as exc:
+        raise HTTPException(status_code=503, detail={
+            "code": "ORDER_BOOK_UNAVAILABLE", "message": "El libro de órdenes no está disponible temporalmente."}) from exc
+    response.headers["X-FTrade-Analytics-Source"] = str(data.get("source", ""))
+    response.headers["X-FTrade-Analytics-Updated-At"] = str(data.get("updated_at", ""))
+    return data
+
+
 @router.get("/calendar")
 async def get_calendar(request: Request, response: Response,
                        view: int = Query(default=7, ge=7, le=30),
