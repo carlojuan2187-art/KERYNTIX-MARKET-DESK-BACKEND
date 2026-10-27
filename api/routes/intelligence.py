@@ -82,6 +82,31 @@ async def get_radar(
             break
     output = dict(result)
     output["setups"] = setups
+
+    # The radar snapshot scans the most liquid pairs, but active setups and old
+    # observed sweeps can reference other symbols. Enrich every displayed symbol
+    # with a cached, real 15M/1H/4H candle analysis rather than leaving the UI null.
+    trend_symbols: list[str] = []
+    def include_symbol(value: Any) -> None:
+        symbol = str(value or "").strip().upper()
+        if symbol.endswith("USDT") and "_" not in symbol and symbol not in trend_symbols:
+            trend_symbols.append(symbol)
+
+    for setup in setups:
+        include_symbol(setup.get("symbol"))
+    for key in ("items", "sweeps", "watch", "movers"):
+        entries = result.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict):
+                include_symbol(entry.get("symbol"))
+    existing_trends = result.get("timeframe_trends")
+    if isinstance(existing_trends, dict):
+        for symbol in existing_trends:
+            include_symbol(symbol)
+    output["timeframe_trends"] = await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(trend_symbols)
+
     response.headers["X-FTrade-Radar-Source"] = str(result.get("source", ""))
     response.headers["X-FTrade-Radar-Updated-At"] = str(result.get("updated_at", ""))
     return output
