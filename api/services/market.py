@@ -243,7 +243,7 @@ class MarketDataService:
                 status.status = "healthy"
             return [Candle.model_validate(row) for row in cached_rows], status
         try:
-            raw_rows = await self.rest.fetch_klines(normalized, interval, limit)
+            raw_rows = await asyncio.wait_for(self.rest.fetch_klines(normalized, interval, limit), timeout=5.5)
             candles = self._convert_klines(raw_rows, zone)
             if not candles:
                 raise BinanceDataError("Binance no devolvió velas válidas")
