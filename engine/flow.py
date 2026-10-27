@@ -31,7 +31,7 @@ from engine.derivatives import BINANCE_FUTURES_API, REQUEST_TIMEOUT, fmt_big, va
 logger = logging.getLogger(__name__)
 
 CANDLE_MINUTES = 5
-CANDLE_LIMIT = 60                       # 5 h de velas de 5m (cubre 4h + margen)
+CANDLE_LIMIT = 240                     # 20 h: 4 h actuales + 3 ventanas históricas para comparar volumen
 CACHE_SECONDS = max(5, int(os.getenv("FLOW_CACHE_SECONDS", "20")))
 
 # (minutos, etiqueta). El número de velas sale de minutos / 5.
@@ -190,10 +190,11 @@ def window_stats(candles: Sequence[Dict[str, float]], minutes: int, now: Optiona
     }
 
 
-def cvd_series(candles: Sequence[Dict[str, float]], points: int = 12) -> List[float]:
-    """Delta acumulado (USDT) de las últimas 4h, muestreado en `points` puntos."""
+def cvd_series(candles: Sequence[Dict[str, float]], points: int = 48, now: Optional[float] = None) -> List[float]:
+    """Delta acumulado (USDT) de las últimas 4h, normalmente una muestra por vela de 5m."""
     n4h = 240 // CANDLE_MINUTES
-    tail = list(candles[-n4h:])
+    closed = list(candles) if now is None else [c for c in candles if c.get("close_t", float("inf")) <= now]
+    tail = list(closed[-n4h:])
     if len(tail) < points:
         return []
     total, cumulative = 0.0, []
@@ -212,7 +213,42 @@ def compute_flow(symbol: str, candles: Sequence[Dict[str, float]], now: Optional
             windows.append(dict(stats, label=label))
     if not windows:
         raise FlowUnavailable(f"Sin datos de flujo para {symbol}")
-    return {"symbol": symbol, "windows": windows, "cvd": cvd_series(candles)}
+    return {"symbol": symbol, "windows": windows, "cvd": cvd_series(candles, now=now)}
+
+
+def price_cvd_context(candles: Sequence[Dict[str, float]], now: Optional[float] = None, lookback: int = 12) -> Dict[str, Any]:
+    """Compara el cambio del precio con el delta taker neto de las últimas velas cerradas.
+
+    La divergencia es una observación descriptiva, no una señal de entrada. Se normaliza
+    el delta por el volumen cotizado para que el umbral sea comparable entre símbolos.
+    """
+    current = time.time() if now is None else now
+    closed = [c for c in candles if c.get("close_t", float("inf")) <= current]
+    if len(closed) < max(lookback, 3):
+        return {"status": "collecting", "label": "Recopilando", "price_change_pct": None,
+                "delta_usdt": None, "delta_share_pct": None, "lookback_candles": len(closed),
+                "message": "Se necesitan más velas cerradas para comparar precio y flujo."}
+    tail = list(closed[-lookback:])
+    first_open = tail[0].get("o", 0.0)
+    last_close = tail[-1].get("c", 0.0)
+    price_change = (last_close / first_open - 1.0) * 100.0 if first_open > 0 else None
+    delta_usdt = sum(2.0 * c.get("tbq", 0.0) - c.get("qv", 0.0) for c in tail)
+    quote_volume = sum(c.get("qv", 0.0) for c in tail)
+    delta_share = delta_usdt / quote_volume * 100.0 if quote_volume > 0 else None
+    if price_change is None or delta_share is None:
+        status, label, message = "collecting", "Recopilando", "No hay volumen cotizado suficiente para confirmar la lectura."
+    elif price_change >= PRICE_MOVE_NOTICE and delta_share <= -3.0:
+        status, label, message = "bearish_divergence", "Divergencia bajista", "El precio sube mientras el delta neto de compradores agresivos es negativo."
+    elif price_change <= -PRICE_MOVE_NOTICE and delta_share >= 3.0:
+        status, label, message = "bullish_divergence", "Divergencia alcista", "El precio cae mientras el delta neto de compradores agresivos es positivo."
+    elif price_change > 0 and delta_share > 0:
+        status, label, message = "buyers_confirmed", "Compra acompaña", "El movimiento alcista coincide con delta comprador."
+    elif price_change < 0 and delta_share < 0:
+        status, label, message = "sellers_confirmed", "Venta acompaña", "El movimiento bajista coincide con delta vendedor."
+    else:
+        status, label, message = "mixed", "Sin confirmación", "El precio y el delta no muestran una confirmación clara en esta ventana."
+    return {"status": status, "label": label, "price_change_pct": price_change, "delta_usdt": delta_usdt,
+            "delta_share_pct": delta_share, "lookback_candles": len(tail), "message": message}
 
 
 def get_flow(symbol: str, now: Optional[float] = None) -> Dict[str, Any]:
