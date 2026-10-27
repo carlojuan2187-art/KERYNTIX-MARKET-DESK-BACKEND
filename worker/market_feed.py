@@ -23,16 +23,23 @@ from api.cache import JsonCache, RedisJsonCache
 from api.services.market import FEED_STATUS_KEY, FUNDING_KEY, QUOTES_KEY, quote_from_ticker, utc_iso
 
 logger = logging.getLogger("ftrade.market.worker")
-# Binance USD-M Futures combined streams use /stream on the host root.
-# The old default appended /market, producing the invalid /market/stream path
-# and causing the worker to reconnect forever when no override was supplied.
-WS_BASE = os.getenv("BINANCE_FUTURES_WS", "wss://fstream.binance.com").strip().rstrip("/")
+# Binance split the USD-M Futures WebSocket endpoints by data category in 2026.
+# Mini tickers, force orders and mark prices are MARKET streams, so the combined
+# URL must use /market/stream. Legacy /stream routes now serve only PUBLIC data.
+# Accept either a host root or the configured /market URL, but normalize to the
+# host root before adding the required routed path exactly once.
+WS_BASE = os.getenv("BINANCE_FUTURES_WS", "wss://fstream.binance.com/market").strip().rstrip("/")
 for _suffix in ("/market", "/stream", "/ws"):
     if WS_BASE.endswith(_suffix):
         WS_BASE = WS_BASE[:-len(_suffix)].rstrip("/")
 STREAMS = "!miniTicker@arr/!forceOrder@arr/!markPrice@arr@1s"
-STREAM_URL = f"{WS_BASE}/stream?streams={STREAMS}"
+STREAM_URL = f"{WS_BASE}/market/stream?streams={STREAMS}"
 WATCHDOG_SECONDS = max(5.0, float(os.getenv("MARKET_STREAM_WATCHDOG_SECONDS", "15")))
+# Auxiliary mark-price/funding events can keep a socket alive while its actual
+# mini-ticker stream is stalled. Track price freshness independently and force a
+# reconnect if the market-price channel stops delivering data.
+PRICE_STREAM_WATCHDOG_SECONDS = max(5.0, float(os.getenv("MARKET_PRICE_WATCHDOG_SECONDS", "12")))
+PRICE_STREAM_INITIAL_GRACE_SECONDS = max(20.0, PRICE_STREAM_WATCHDOG_SECONDS * 2.0)
 MAX_BACKOFF_SECONDS = 30.0
 SPARKLINE_POINTS = 60
 LIQUIDATION_RETENTION_SECONDS = 2 * 60 * 60
@@ -208,13 +215,23 @@ class MarketFeedWorker:
             self._movers_started_epoch = self.clock()
             self._liquidations_started_epoch = self.clock()
             self._liquidations_connection_count += 1
+            session_started = self.clock()
+            last_price_tick_epoch: float | None = None
             await self._write_status(connected=True, message=None)
             await self._write_liquidations_status(connected=True, reset_coverage=True)
             await self._write_movers_collecting()
             try:
                 while not self._stop.is_set():
                     raw = await asyncio.wait_for(websocket.recv(), timeout=WATCHDOG_SECONDS)
-                    await self.process_message(raw)
+                    result = await self.process_message(raw)
+                    now = self.clock()
+                    if result.get("quotes_updated", 0) > 0:
+                        last_price_tick_epoch = now
+                    elif last_price_tick_epoch is None:
+                        if now - session_started > PRICE_STREAM_INITIAL_GRACE_SECONDS:
+                            raise TimeoutError("Binance WebSocket conectado, pero no llegan mini-tickers de precio")
+                    elif now - last_price_tick_epoch > PRICE_STREAM_WATCHDOG_SECONDS:
+                        raise TimeoutError("El stream de precios se estancó aunque siguen llegando mensajes auxiliares")
             finally:
                 self.connected = False
                 await self._write_status(connected=False, message="Conexión WebSocket cerrada.")
