@@ -117,6 +117,7 @@ class BinanceRestClient:
         """
         allowed = {
             "/fapi/v1/premiumIndex",
+            "/fapi/v1/depth",
             "/futures/data/openInterestHist",
             "/futures/data/globalLongShortAccountRatio",
             "/futures/data/topLongShortPositionRatio",
