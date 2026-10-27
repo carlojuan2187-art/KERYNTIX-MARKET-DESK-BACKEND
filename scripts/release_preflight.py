@@ -57,7 +57,7 @@ REQUIRED_FILES = (
     "api/services/plans.py", "api/services/payments.py",
     "api/services/business_notifications.py", "worker/supervisor.py",
     "worker/telegram_auth_bot.py", "worker/telegram_notification_delivery.py",
-    "worker/web_push_delivery.py", "API_CONTRACT.md",
+    "worker/web_push_delivery.py", "API_CONTRACT.md", "Dockerfile.worker", "WORKER-RAILWAY-DEPLOY.md",
 )
 CORE_IMPORTS = ("fastapi", "pydantic", "pymongo", "redis", "httpx", "requests", "pandas", "websockets")
 PRODUCTION_IMPORTS = ("cryptography", "pywebpush")
@@ -180,6 +180,22 @@ def inspect_backend(
         add("worker-health-contract", "ok" if worker_ok else "error", worker_detail)
     except Exception as exc:
         add("worker-health-contract", "error", f"Could not inspect worker inventory ({type(exc).__name__}).")
+
+    worker_dockerfile = root / "Dockerfile.worker"
+    deploy_guide = root / "WORKER-RAILWAY-DEPLOY.md"
+    try:
+        dockerfile_text = worker_dockerfile.read_text(encoding="utf-8")
+        deployment_contract_ok = (
+            'CMD ["python", "-m", "worker.supervisor"]' in dockerfile_text
+            and "REDIS_URL" in deploy_guide.read_text(encoding="utf-8")
+            and "FTRADE_DEPLOYMENT_NAME" in deploy_guide.read_text(encoding="utf-8")
+        )
+        add("worker-deployment-contract", "ok" if deployment_contract_ok else "error",
+            "Dedicated worker image and Railway instructions agree on the supervised worker entrypoint and shared Redis namespace."
+            if deployment_contract_ok else
+            "Dockerfile.worker must start worker.supervisor and the deployment guide must document shared Redis and worker namespace.")
+    except OSError as exc:
+        add("worker-deployment-contract", "error", f"Could not read worker deployment files ({type(exc).__name__}).")
 
     missing_core = []
     for module_name in CORE_IMPORTS:
