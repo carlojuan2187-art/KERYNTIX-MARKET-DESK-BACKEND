@@ -50,7 +50,7 @@ from api.routes.user_features import router as user_features_router
 from api.routes.web_push import router as web_push_router
 from api.services.analytics import MarketAnalyticsService
 from api.services.auth import AuthService
-from api.services.market import MarketDataService
+from api.services.market import FEED_STATUS_KEY, MarketDataService
 from api.services.market_intelligence import MarketIntelligenceService
 from api.services.plans import PlanService
 from api.services.payments import PaymentService, ChainVerifier, BscRpcVerifier
@@ -399,6 +399,20 @@ def create_app(
             business_storage = request.app.state.business_repository.health()
             market_cache_health = await request.app.state.market_cache.health()
             try:
+                feed_status = await request.app.state.market_service.feed_status()
+                market_feed_status = feed_status.model_dump()
+            except Exception as exc:
+                market_feed_status = {"status": "unavailable", "source": "none", "connected": False,
+                                      "stale_seconds": None, "message": type(exc).__name__}
+            try:
+                raw_feed_status = await request.app.state.market_cache.get_json(FEED_STATUS_KEY)
+                if isinstance(raw_feed_status, dict):
+                    market_feed_status["connection_count"] = raw_feed_status.get("connection_count")
+                    market_feed_status["last_message_at"] = raw_feed_status.get("last_message_at")
+                    market_feed_status["last_price_update_at"] = raw_feed_status.get("last_price_update_at")
+            except Exception:
+                pass
+            try:
                 signal_engine = await request.app.state.market_cache.get_json("signal-engine:status:v1")
             except Exception:
                 signal_engine = {"status": "unavailable"}
@@ -509,6 +523,7 @@ def create_app(
                 "user_feature_storage": user_feature_storage,
                 "business_storage": business_storage,
                 "market_cache": market_cache_health,
+                "market_feed": market_feed_status,
                 "signal_engine": signal_engine,
                 "signal_lifecycle": signal_lifecycle,
                 "plan_maintenance": plan_maintenance,
@@ -522,7 +537,7 @@ def create_app(
             logger.exception("Health check no disponible")
             return JSONResponse(
                 status_code=503,
-                content={"status": "degraded", "service": "ftrade-api", "storage": {"status": "error"}, "auth_storage": {"status": "error"}, "business_storage": {"status": "error"}, "sweep_storage": {"status": "error"}, "user_feature_storage": {"status": "error"}, "market_cache": {"status": "error"}, "signal_engine": {"status": "unavailable"}, "signal_lifecycle": {"status": "unavailable"}, "plan_maintenance": {"status": "unavailable"}, "user_alert_dispatcher": {"status": "unavailable"}, "business_reconciliation": {"status": "unavailable"}, "telegram_notification_delivery": {"status": "unavailable"}, "web_push_delivery": {"status": "unavailable"}, "workers": {}},
+                content={"status": "degraded", "service": "ftrade-api", "storage": {"status": "error"}, "auth_storage": {"status": "error"}, "business_storage": {"status": "error"}, "sweep_storage": {"status": "error"}, "user_feature_storage": {"status": "error"}, "market_cache": {"status": "error"}, "market_feed": {"status": "unavailable", "source": "none", "connected": False}, "signal_engine": {"status": "unavailable"}, "signal_lifecycle": {"status": "unavailable"}, "plan_maintenance": {"status": "unavailable"}, "user_alert_dispatcher": {"status": "unavailable"}, "business_reconciliation": {"status": "unavailable"}, "telegram_notification_delivery": {"status": "unavailable"}, "web_push_delivery": {"status": "unavailable"}, "workers": {}},
             )
 
     @app.get("/ready", tags=["operations"])
