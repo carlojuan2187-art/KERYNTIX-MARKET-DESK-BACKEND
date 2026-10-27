@@ -317,3 +317,10 @@ def test_quote_health_uses_price_tick_age_not_only_auxiliary_websocket_messages(
     assert health.status == "degraded"
     assert health.source == "cache"
     assert health.stale_seconds == 20
+
+
+def test_combined_stream_url_uses_futures_root_stream_endpoint():
+    from worker.market_feed import STREAM_URL
+
+    assert STREAM_URL.startswith("wss://fstream.binance.com/stream?streams=") or "/stream?streams=" in STREAM_URL
+    assert "/market/stream?streams=" not in STREAM_URL
