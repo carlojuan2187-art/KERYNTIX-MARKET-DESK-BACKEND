@@ -23,11 +23,14 @@ from worker.binance_rest import BinanceDataError, BinanceInvalidSymbolError, Bin
 logger = logging.getLogger("ftrade.analytics")
 
 DERIVATIVES_TTL = 60
-FLOW_TTL = 20
+FLOW_TTL = 10
+ORDER_BOOK_TTL = 5
+ORDER_BOOK_LEVELS = 20
 REGIME_TTL = 90
 CALENDAR_TTL = 300
 DERIVATIVES_KEY_PREFIX = "market:derivatives:v1:"
 FLOW_KEY_PREFIX = "market:flow:v1:"
+ORDER_BOOK_KEY_PREFIX = "market:orderbook:v1:"
 REGIME_KEY = "market:regime:v1"
 CALENDAR_KEY_PREFIX = "market:calendar:v1:"
 SYMBOL_ALLOWED = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
@@ -79,15 +82,22 @@ def _frame_from_klines(rows: list[list[Any]]) -> pd.DataFrame:
     return pd.DataFrame(parsed)
 
 
-def _cvd_candles(candles: list[dict[str, float]], cvd_values: list[float], tz_name: str) -> list[dict[str, Any]]:
+def _cvd_candles(candles: list[dict[str, float]], cvd_values: list[float], tz_name: str,
+                 now: float | None = None) -> list[dict[str, Any]]:
     if not candles or not cvd_values:
         return []
     try:
         zone = ZoneInfo(tz_name)
     except (ZoneInfoNotFoundError, TypeError, ValueError):
         zone = ZoneInfo("UTC")
-    tail = candles[-(240 // flow_engine.CANDLE_MINUTES):]
-    points = len(cvd_values)
+    current = time.time() if now is None else now
+    closed = [row for row in candles if row.get("close_t", float("inf")) <= current]
+    tail = closed[-(240 // flow_engine.CANDLE_MINUTES):]
+    points = min(len(cvd_values), len(tail))
+    cvd_values = cvd_values[-points:]
+    tail = tail[-points:]
+    if points == 0:
+        return []
     step = len(tail) / points
     result = []
     for index, cvd in enumerate(cvd_values):
@@ -109,6 +119,7 @@ class MarketAnalyticsService:
         self.clock = clock
         self._derivative_locks: dict[str, asyncio.Lock] = {}
         self._flow_locks: dict[str, asyncio.Lock] = {}
+        self._order_book_locks: dict[str, asyncio.Lock] = {}
         self._regime_lock = asyncio.Lock()
         self._calendar_locks: dict[int, asyncio.Lock] = {}
 
@@ -221,7 +232,8 @@ class MarketAnalyticsService:
             candles = flow_engine.parse_candles(rows)
             if len(candles) < 49:
                 raise AnalyticsUnavailable("FLOW_COLLECTING")
-            computed = flow_engine.compute_flow(symbol, candles, now=self.clock())
+            now = self.clock()
+            computed = flow_engine.compute_flow(symbol, candles, now=now)
             windows = []
             for row in computed["windows"]:
                 windows.append({
@@ -231,19 +243,112 @@ class MarketAnalyticsService:
                     "change_pct": row["price_chg"], "volume_ratio": row.get("volume_ratio"),
                     "volume_usdt": row["volume_quote"],
                 })
+            closed_candles = [row for row in candles if row.get("close_t", float("inf")) <= now]
+            last_closed = max((row.get("close_t", 0.0) for row in closed_candles), default=None)
+            last_closed_age = max(0.0, now - last_closed) if last_closed is not None else None
+            required_for_4h_baseline = 4 * (240 // flow_engine.CANDLE_MINUTES)
+            latest_window_4h = next((row for row in windows if row["label"] == "4h"), {})
+            quality = {
+                "history_candles": len(candles),
+                "closed_candles": len(closed_candles),
+                "history_minutes": len(closed_candles) * flow_engine.CANDLE_MINUTES,
+                "history_hours": round(len(closed_candles) * flow_engine.CANDLE_MINUTES / 60.0, 2),
+                "required_candles_for_4h_volume_baseline": required_for_4h_baseline,
+                "volume_ratio_4h_ready": latest_window_4h.get("volume_ratio") is not None,
+                "last_closed_candle_at": utc_iso(last_closed) if last_closed is not None else None,
+                "last_closed_age_seconds": round(last_closed_age, 1) if last_closed_age is not None else None,
+                "coverage_complete": len(closed_candles) >= required_for_4h_baseline,
+            }
+            if not quality["coverage_complete"]:
+                quality["message"] = "Historial parcial: el ratio de volumen de 4H necesita aproximadamente 16 horas de velas cerradas."
+            elif not quality["volume_ratio_4h_ready"]:
+                quality["message"] = "Hay historial suficiente, pero no se pudo formar una referencia fiable de volumen para 4H."
+            else:
+                quality["message"] = None
+            price_cvd = flow_engine.price_cvd_context(candles, now=now)
             output = {
                 "symbol": symbol,
                 "windows": windows,
-                "cvd": _cvd_candles(candles, computed["cvd"], "UTC"),
+                "cvd": _cvd_candles(candles, computed["cvd"], "UTC", now=now),
+                "price_cvd": price_cvd,
+                "quality": quality,
                 "volume_ratio": next((row.get("volume_ratio") for row in windows if row["label"] == "15m"), None),
                 "reading": " ".join(flow_engine.interpret_flow(computed)),
-                "updated_at": utc_iso(self.clock()),
+                "updated_at": utc_iso(now),
                 "source": "binance_futures_klines_5m",
                 "status": "ok",
                 "raw": computed,
             }
             await self.cache.set_json(key, output, ttl_seconds=FLOW_TTL)
             return self._flow_for_timezone(output, tz_name)
+
+    async def order_book(self, symbol: str, limit: int = ORDER_BOOK_LEVELS) -> dict[str, Any]:
+        """Return a short-lived, real Binance Futures order-book snapshot."""
+        symbol = _validated_symbol(symbol)
+        if limit not in (5, 10, 20, 50, 100):
+            raise ValueError("INVALID_ORDER_BOOK_LIMIT")
+        key = f"{ORDER_BOOK_KEY_PREFIX}{symbol}:{limit}"
+        cached = await self.cache.get_json(key)
+        now = self.clock()
+        if isinstance(cached, dict) and now - float(cached.get("updated_epoch", 0) or 0) < ORDER_BOOK_TTL:
+            return cached
+        async with self._lock_for(self._order_book_locks, key):
+            cached = await self.cache.get_json(key)
+            now = self.clock()
+            if isinstance(cached, dict) and now - float(cached.get("updated_epoch", 0) or 0) < ORDER_BOOK_TTL:
+                return cached
+            raw = await self._safe_endpoint("/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+            if not isinstance(raw, dict):
+                raise AnalyticsUnavailable("ORDER_BOOK_UNAVAILABLE")
+
+            def levels(rows: Any, *, descending: bool) -> list[dict[str, float]]:
+                output: list[dict[str, float]] = []
+                if not isinstance(rows, list):
+                    return output
+                for row in rows:
+                    if not isinstance(row, (list, tuple)) or len(row) < 2:
+                        continue
+                    price = _finite(row[0])
+                    quantity = _finite(row[1])
+                    if price is None or quantity is None or price <= 0 or quantity < 0:
+                        continue
+                    output.append({"price": price, "quantity": quantity, "notional_usdt": price * quantity})
+                output.sort(key=lambda row: row["price"], reverse=descending)
+                return output[:limit]
+
+            bids = levels(raw.get("bids"), descending=True)
+            asks = levels(raw.get("asks"), descending=False)
+            if not bids or not asks:
+                raise AnalyticsUnavailable("ORDER_BOOK_EMPTY")
+            best_bid, best_ask = bids[0]["price"], asks[0]["price"]
+            mid = (best_bid + best_ask) / 2.0
+            bid_depth = sum(row["notional_usdt"] for row in bids)
+            ask_depth = sum(row["notional_usdt"] for row in asks)
+            combined_depth = bid_depth + ask_depth
+            spread = max(0.0, best_ask - best_bid)
+            output = {
+                "symbol": symbol,
+                "limit": limit,
+                "last_update_id": int(raw.get("lastUpdateId") or 0),
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "mid_price": mid,
+                "spread": spread,
+                "spread_pct": spread / mid * 100.0 if mid > 0 else None,
+                "bid_depth_usdt": bid_depth,
+                "ask_depth_usdt": ask_depth,
+                "bid_share_pct": bid_depth / combined_depth * 100.0 if combined_depth > 0 else None,
+                "imbalance_pct": (bid_depth - ask_depth) / combined_depth * 100.0 if combined_depth > 0 else None,
+                "bids": bids,
+                "asks": asks,
+                "levels_returned": min(len(bids), len(asks)),
+                "source": "binance-futures-order-book",
+                "status": "ok",
+                "updated_at": utc_iso(now),
+                "updated_epoch": now,
+            }
+            await self.cache.set_json(key, output, ttl_seconds=ORDER_BOOK_TTL)
+            return output
 
     @staticmethod
     def _flow_for_timezone(data: dict[str, Any], tz_name: str) -> dict[str, Any]:

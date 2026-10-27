@@ -310,6 +310,9 @@ class MarketIntelligenceService:
         output["coverage_seconds"] = coverage
         output["coverage_complete"] = coverage >= window_minutes * 60
         output["connected"] = bool(status.get("connected") and feed.get("connected"))
+        output["last_event_at"] = status.get("last_event_at")
+        output["feed_status"] = str(feed.get("status") or "unavailable")
+        output["last_feed_message_at"] = feed.get("last_message_at")
         output["status"] = "ok" if output["coverage_complete"] else "collecting"
         output["message"] = None if output["coverage_complete"] else "Recopilando historial; esta ventana todavía no tiene cobertura completa."
         output["source"] = "binance-futures-force-order-stream"
