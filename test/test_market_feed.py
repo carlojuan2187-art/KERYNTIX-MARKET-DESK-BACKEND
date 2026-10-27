@@ -319,8 +319,45 @@ def test_quote_health_uses_price_tick_age_not_only_auxiliary_websocket_messages(
     assert health.stale_seconds == 20
 
 
-def test_combined_stream_url_uses_futures_root_stream_endpoint():
+def test_combined_stream_url_uses_market_routed_endpoint():
     from worker.market_feed import STREAM_URL
 
-    assert STREAM_URL.startswith("wss://fstream.binance.com/stream?streams=") or "/stream?streams=" in STREAM_URL
-    assert "/market/stream?streams=" not in STREAM_URL
+    # Binance retired unrouted legacy market streams after 2026-04-23.
+    assert STREAM_URL.startswith("wss://fstream.binance.com/market/stream?streams=")
+    assert "!miniTicker@arr" in STREAM_URL
+    assert "!forceOrder@arr" in STREAM_URL
+    assert "!markPrice@arr@1s" in STREAM_URL
+
+
+def test_worker_reconnects_when_only_auxiliary_messages_arrive(monkeypatch):
+    """Funding messages must not keep a dead price stream alive indefinitely."""
+    import pytest
+    import worker.market_feed as market_feed_module
+
+    clock_value = [0.0]
+    cache = InMemoryJsonCache()
+
+    class AuxiliaryOnlySocket:
+        async def recv(self):
+            clock_value[0] += 1.0
+            # Funding changes keep producing messages, but there are no mini-tickers.
+            return {"stream": "!markPrice@arr@1s", "data": [
+                {"e": "markPriceUpdate", "s": "BTCUSDT", "p": "100", "i": "100", "r": str(clock_value[0] / 100000), "T": 1761400300000, "st": 1},
+            ]}
+
+    class FakeConnection:
+        async def __aenter__(self):
+            return AuxiliaryOnlySocket()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(market_feed_module, "WATCHDOG_SECONDS", 5.0)
+    monkeypatch.setattr(market_feed_module, "PRICE_STREAM_WATCHDOG_SECONDS", 2.0)
+    monkeypatch.setattr(market_feed_module, "PRICE_STREAM_INITIAL_GRACE_SECONDS", 2.0)
+    worker = MarketFeedWorker(cache, connect_factory=lambda _url: FakeConnection(), clock=lambda: clock_value[0])
+    with pytest.raises(TimeoutError, match="no llegan mini-tickers"):
+        run(worker._session())
+    status = run(cache.get_json(FEED_STATUS_KEY))
+    assert status["connected"] is False
+    assert status["status"] == "degraded"

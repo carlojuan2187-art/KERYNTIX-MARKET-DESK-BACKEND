@@ -25,6 +25,7 @@ def test_release_preflight_passes_route_worker_and_source_inventory(monkeypatch)
     checks = {item["name"]: item for item in report["checks"]}
     assert checks["api-contract-routes"]["status"] == "ok"
     assert checks["worker-health-contract"]["status"] == "ok"
+    assert checks["worker-deployment-contract"]["status"] == "ok"
     assert checks["python-target-version"]["status"] == "ok"
 
 

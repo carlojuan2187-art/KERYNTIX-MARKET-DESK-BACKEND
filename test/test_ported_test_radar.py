@@ -6,7 +6,7 @@ import pandas as pd
 
 from engine import radar
 from engine.regime import REGIME_DOWN, REGIME_UP
-from tests.test_ported_test_regime import make_frame
+from test.test_ported_test_regime import make_frame
 
 
 def frames(price=100.0):
