@@ -78,7 +78,7 @@ class WindowTests(unittest.TestCase):
     def test_cvd_series_points(self):
         candles = make_candles(60, lambda i: 0.8)
         series = flow.cvd_series(candles)
-        self.assertEqual(len(series), 12)
+        self.assertEqual(len(series), 48)
         self.assertTrue(all(b > a for a, b in zip(series, series[1:])))  # sólo compra: sube siempre
 
 

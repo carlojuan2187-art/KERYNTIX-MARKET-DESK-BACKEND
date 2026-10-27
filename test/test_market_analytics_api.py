@@ -75,6 +75,10 @@ class FakeAnalyticsRest:
                     {"longShortRatio": "1.4", "longAccount": "0.58", "shortAccount": "0.42"}]
         if path.endswith("topLongShortPositionRatio"):
             return [{"longShortRatio": "1.1"}]
+        if path.endswith("/depth"):
+            bids = [[str(100 - i), str(2 + i)] for i in range(20)]
+            asks = [[str(101 + i), str(1 + i)] for i in range(20)]
+            return {"lastUpdateId": 98765, "bids": bids, "asks": asks}
         raise AssertionError(path)
 
     async def close(self):
@@ -148,10 +152,38 @@ def test_flow_api_uses_exchange_klines_and_returns_real_ohlcv_with_cvd():
     assert data["source"] == "binance_futures_klines_5m"
     assert [row["label"] for row in data["windows"]] == ["15m", "1h", "4h"]
     assert 0 <= data["windows"][0]["buy_pct"] <= 100
-    assert data["cvd"] and {"time", "timestamp", "open", "high", "low", "close", "volume", "cvd"}.issubset(data["cvd"][0])
+    assert len(data["cvd"]) == 48
+    assert {"time", "timestamp", "open", "high", "low", "close", "volume", "cvd"}.issubset(data["cvd"][0])
+    assert data["quality"]["closed_candles"] >= 192
+    assert data["quality"]["coverage_complete"] is True
+    assert data["quality"]["volume_ratio_4h_ready"] is True
+    assert data["price_cvd"]["status"] == "buyers_confirmed"
     assert cached.status_code == 200
     assert sum(1 for call in rest.calls if call[:3] == ("klines", "BTCUSDT", "5m")) == 1
 
+
+
+def test_order_book_api_returns_real_depth_metrics_and_uses_short_cache():
+    app, _, rest = get_test_app()
+    with TestClient(app) as client:
+        response = client.get("/market/orderbook?symbol=BTCUSDT&limit=20")
+        count_after_first = sum(1 for call in rest.calls if call[:2] == ("endpoint", "/fapi/v1/depth"))
+        cached = client.get("/market/orderbook?symbol=BTCUSDT&limit=20")
+        invalid_limit = client.get("/market/orderbook?symbol=BTCUSDT&limit=30")
+        invalid_symbol = client.get("/market/orderbook?symbol=BTC/USD&limit=20")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["source"] == "binance-futures-order-book"
+    assert data["best_bid"] == pytest.approx(100)
+    assert data["best_ask"] == pytest.approx(101)
+    assert data["spread"] == pytest.approx(1)
+    assert data["spread_pct"] > 0
+    assert len(data["bids"]) == 20 and len(data["asks"]) == 20
+    assert data["bid_depth_usdt"] > 0 and data["ask_depth_usdt"] > 0
+    assert cached.status_code == 200
+    assert sum(1 for call in rest.calls if call[:2] == ("endpoint", "/fapi/v1/depth")) == count_after_first == 1
+    assert invalid_limit.status_code == 422
+    assert invalid_symbol.status_code == 422
 
 def test_calendar_api_returns_events_sorted_and_exposes_bls_health(monkeypatch):
     monkeypatch.setattr(crypto_calendar, "get_bls_events", lambda: {"events": [], "ok": True})
