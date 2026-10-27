@@ -23,7 +23,13 @@ from api.cache import JsonCache, RedisJsonCache
 from api.services.market import FEED_STATUS_KEY, FUNDING_KEY, QUOTES_KEY, quote_from_ticker, utc_iso
 
 logger = logging.getLogger("ftrade.market.worker")
-WS_BASE = os.getenv("BINANCE_FUTURES_WS", "wss://fstream.binance.com/market").rstrip("/")
+# Binance USD-M Futures combined streams use /stream on the host root.
+# The old default appended /market, producing the invalid /market/stream path
+# and causing the worker to reconnect forever when no override was supplied.
+WS_BASE = os.getenv("BINANCE_FUTURES_WS", "wss://fstream.binance.com").strip().rstrip("/")
+for _suffix in ("/market", "/stream", "/ws"):
+    if WS_BASE.endswith(_suffix):
+        WS_BASE = WS_BASE[:-len(_suffix)].rstrip("/")
 STREAMS = "!miniTicker@arr/!forceOrder@arr/!markPrice@arr@1s"
 STREAM_URL = f"{WS_BASE}/stream?streams={STREAMS}"
 WATCHDOG_SECONDS = max(5.0, float(os.getenv("MARKET_STREAM_WATCHDOG_SECONDS", "15")))
