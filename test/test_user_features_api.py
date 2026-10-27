@@ -204,3 +204,24 @@ def test_reenabling_price_alert_rejects_duplicate_active_level():
         states = {row["id"]: row["enabled"] for row in current_alerts}
         assert states[first_id] is False
         assert states[second.json()["id"]] is True
+
+
+def test_watchlist_returns_active_signal_entry_stop_and_targets():
+    app, _auth, _features, _cache, _principal = setup()
+    app.state.watchlist_service.signals = InMemorySignalRepository([
+        {
+            "id": "signal-levels-1", "symbol": "BTCUSDT", "direction": "LONG",
+            "status": "PENDING", "score": 91, "entry_price": 100.0,
+            "entry_zone": {"low": 99.5, "high": 100.5}, "stop_loss": 97.0,
+            "take_profits": [103.0, 106.0, 109.0],
+            "created_at": datetime.now(UTC).isoformat(),
+        }
+    ])
+    with TestClient(app) as client:
+        response = client.post("/watchlist", json={"symbol": "BTC"})
+        assert response.status_code == 201, response.text
+        active = response.json()["items"][0]["active_signal"]
+        assert active["entry_price"] == 100.0
+        assert active["entry_low"] == 99.5 and active["entry_high"] == 100.5
+        assert active["stop_loss"] == 97.0
+        assert active["take_profits"] == [103.0, 106.0, 109.0]
