@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any
 
 import httpx
@@ -21,10 +22,13 @@ class BinanceInvalidSymbolError(BinanceDataError):
 class BinanceRestClient:
     def __init__(self, *, base_url: str = "https://fapi.binance.com", timeout_seconds: float = 8.0,
                  retries: int = 3, client: httpx.AsyncClient | None = None,
-                 sleep=asyncio.sleep) -> None:
+                 sleep=asyncio.sleep, api_key: str | None = None) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.retries = max(1, min(int(retries), 5))
+        # Used only server-side for Binance MARKET_DATA endpoints that explicitly
+        # require X-MBX-APIKEY. Never expose it in API responses or VITE_*.
+        self.api_key = (os.getenv("BINANCE_API_KEY", "") if api_key is None else api_key).strip()
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds)),
@@ -35,12 +39,17 @@ class BinanceRestClient:
         self._semaphore = asyncio.Semaphore(4)
         self._sleep = sleep
 
-    async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    @property
+    def api_key_configured(self) -> bool:
+        return bool(self.api_key)
+
+    async def _get_json(self, path: str, params: dict[str, Any] | None = None,
+                        headers: dict[str, str] | None = None) -> Any:
         last_error: Exception | None = None
         async with self._semaphore:
             for attempt in range(self.retries):
                 try:
-                    response = await self._client.get(path, params=params)
+                    response = await self._client.get(path, params=params, headers=headers)
                     if response.status_code == 400:
                         try:
                             body = response.json()
@@ -117,14 +126,29 @@ class BinanceRestClient:
         """
         allowed = {
             "/fapi/v1/premiumIndex",
+            "/fapi/v1/openInterest",
+            "/fapi/v1/fundingRate",
+            "/fapi/v1/ticker/24hr",
             "/fapi/v1/depth",
             "/futures/data/openInterestHist",
             "/futures/data/globalLongShortAccountRatio",
+            "/futures/data/basis",
+            "/futures/data/takerlongshortRatio",
+            "/futures/data/topLongShortAccountRatio",
             "/futures/data/topLongShortPositionRatio",
         }
         if path not in allowed:
             raise ValueError("UNSUPPORTED_ANALYTICS_ENDPOINT")
-        return await self._get_json(path, params)
+        protected_market_data = {
+            "/futures/data/topLongShortAccountRatio",
+            "/futures/data/topLongShortPositionRatio",
+        }
+        headers = None
+        if path in protected_market_data:
+            if not self.api_key_configured:
+                raise BinanceDataError("BINANCE_API_KEY_REQUIRED")
+            headers = {"X-MBX-APIKEY": self.api_key}
+        return await self._get_json(path, params, headers=headers)
 
     async def close(self) -> None:
         if self._owns_client:
