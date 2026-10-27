@@ -238,10 +238,19 @@ class WatchlistService:
             symbol = str(signal.get("symbol") or "").upper()
             state = str(signal.get("status") or ((signal.get("lifecycle") or {}).get("status") if isinstance(signal.get("lifecycle"), dict) else "") or "").upper()
             if symbol in symbols and state in {"PENDING", "TOUCHED"} and symbol not in active:
+                raw_entry_zone = signal.get("entry_zone") if isinstance(signal.get("entry_zone"), Mapping) else {}
+                raw_targets = signal.get("take_profits")
+                if not isinstance(raw_targets, list) or not raw_targets:
+                    raw_targets = [signal.get("tp1"), signal.get("tp2"), signal.get("tp3")]
+                take_profits = [value for value in (_safe_float(target) for target in raw_targets) if value is not None and value > 0]
                 active[symbol] = {
                     "id": str(signal.get("id") or signal.get("_id") or ""),
                     "direction": signal.get("direction"), "status": state,
-                    "score": signal.get("score"), "entry_price": signal.get("entry_price"),
+                    "score": signal.get("score"), "entry_price": _safe_float(signal.get("entry_price")),
+                    "entry_low": _safe_float(signal.get("entry_low")) if _safe_float(signal.get("entry_low")) is not None else _safe_float(raw_entry_zone.get("low")),
+                    "entry_high": _safe_float(signal.get("entry_high")) if _safe_float(signal.get("entry_high")) is not None else _safe_float(raw_entry_zone.get("high")),
+                    "stop_loss": _safe_float(signal.get("stop_loss")),
+                    "take_profits": take_profits,
                     "created_at": iso(signal.get("created_at")),
                 }
         # Strategy-aligned trend/score enrichment. Each symbol is analyzed once per shared
