@@ -218,7 +218,7 @@ Estos endpoints ya están implementados en FastAPI, pero las páginas React cont
 | Método y ruta | Respuesta | Notas |
 |---|---|---|
 | `GET /market/regime` | `MarketRegime` más `timeframes`, `confidence`, `score`, `reference`, `breadth` y `guidance` | Calcula con el módulo original `regime.py`, usando velas de Binance Futures 15m/1h/4h. Puede responder 503 si no hay suficiente histórico o falla la fuente principal. |
-| `GET /derivatives?symbol=BTCUSDT` | `DerivativesData` más `raw` y `updated_at` | Funding, mark/index, OI, cambios de OI y ratios. Las métricas individuales se permiten `null` si su fuente no responde; no se sustituyen por ceros. |
+| `GET /derivatives?symbol=BTCUSDT` | `DerivativesData` más `raw`, `sources` y `updated_at` | Funding actual e histórico, interés abierto actual e histórico, cambios de OI solo si hay cobertura suficiente, ratios de cuentas y top traders (con `BINANCE_API_KEY` solo del lado backend), flujo taker por ventana, base del contrato y metadatos de frescura. Las métricas individuales se permiten `null` si su fuente no responde; no se sustituyen por ceros. |
 | `GET /market/flow?symbol=BTCUSDT` | `FlowData` más `source`, `status`, `updated_at` y `raw` | Requiere velas reales de 5m; entrega ventanas 15m/1h/4h y puntos CVD con OHLCV muestreado. `time` se formatea según la zona horaria del usuario, `timestamp` son milisegundos Unix. |
 | `GET /calendar?view=7` | `CalendarEventItem[]` | `view` admite 7 o 30 días. Combina FOMC, vencimientos Deribit, CPI/NFP de BLS cuando la fuente está disponible y el próximo funding de BTC si Binance lo devuelve. `X-FTrade-Calendar-BLS` permite observar disponibilidad/degradación de BLS. |
 
