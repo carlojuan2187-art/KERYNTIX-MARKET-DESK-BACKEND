@@ -117,10 +117,18 @@ class VerifyCodeResponse(BaseModel):
     access_token: str
     user: UserResponse
     is_new: bool
+    # Only present when AUTH_REFRESH_IN_BODY is enabled (default). Lets the SPA
+    # keep the session when the browser blocks the cross-site refresh cookie.
+    refresh_token: str | None = None
 
 
 class RefreshResponse(BaseModel):
     access_token: str
+    refresh_token: str | None = None
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str | None = Field(default=None, max_length=256)
 
 
 class SessionRecordResponse(BaseModel):
