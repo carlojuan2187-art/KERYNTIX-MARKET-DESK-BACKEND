@@ -28,6 +28,12 @@ class ContractUnbanRequest(BaseModel):
     reason: str = Field(default="Desbaneo desde panel administrativo", min_length=5, max_length=500)
 
 
+class StatsResetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reason: str = Field(min_length=5, max_length=500)
+    confirm: bool = False
+
+
 def require_admin(principal: Principal = Depends(current_principal)) -> Principal:
     if not principal.is_admin:
         raise HTTPException(status_code=403, detail={"code": "ADMIN_REQUIRED", "message": "Se requieren permisos de administrador."})
@@ -65,6 +71,36 @@ def admin_stats_contract(request: Request, principal: Principal = Depends(requir
         "total_users": int(summary.get("users_total", 0)),
         "generated_at": summary.get("generated_at"),
     }
+
+
+@router.get("/performance/baseline")
+def stats_baseline(request: Request, principal: Principal = Depends(require_admin)) -> dict:
+    """Current statistics cut-off and how many closed trades it counts or archives."""
+    from api.services import stats_baseline as baseline
+    return baseline.describe(request.app.state.business_repository, request.app.state.signal_repository)
+
+
+@router.post("/performance/reset")
+def stats_reset(body: StatsResetRequest, request: Request, principal: Principal = Depends(require_admin)) -> dict:
+    """Start measuring statistics from zero. Closed trades are kept, only hidden from stats."""
+    from api.services import stats_baseline as baseline
+    if not body.confirm:
+        raise HTTPException(status_code=422, detail={"code": "CONFIRMATION_REQUIRED", "message": "Confirma el reinicio de estadísticas."})
+    reason = body.reason.strip()
+    if not 5 <= len(reason) <= 500:
+        raise HTTPException(status_code=422, detail={"code": "INVALID_REASON", "message": "Indica una razón de 5 a 500 caracteres."})
+    moment = baseline.apply_reset(request.app.state.business_repository, actor_id=principal.user_id, reason=reason)
+    _audit(request, principal.user_id, "stats_reset", "platform", {"reason": reason, "reset_at": moment.isoformat()})
+    return baseline.describe(request.app.state.business_repository, request.app.state.signal_repository)
+
+
+@router.post("/performance/restore")
+def stats_restore(request: Request, principal: Principal = Depends(require_admin)) -> dict:
+    """Undo the reset: statistics count the whole closed-trade history again."""
+    from api.services import stats_baseline as baseline
+    baseline.clear_reset(request.app.state.business_repository)
+    _audit(request, principal.user_id, "stats_restore", "platform", {})
+    return baseline.describe(request.app.state.business_repository, request.app.state.signal_repository)
 
 
 @router.get("/payments")

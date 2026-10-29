@@ -8,6 +8,7 @@ from api.schemas import SignalApiResponse
 from domain.signals import CanonicalSignalResult, OutcomeState
 from api.security import Principal, require_analytical_access
 from api.services.signals import SignalDataIntegrityError, SignalService
+from api.services.stats_baseline import get_reset_at, rows_since
 
 router = APIRouter(prefix="/signals", tags=["signals"])
 
@@ -42,6 +43,8 @@ def list_signal_results(
     """Return immutable closed-trade snapshots (TP1/TP2/SL), newest first."""
     try:
         rows = request.app.state.signal_repository.list_results(limit=limit)
+        # Admin statistics reset: count only trades closed after the cut-off.
+        rows = rows_since(rows, get_reset_at(request.app.state.business_repository))
     except RepositoryUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "DATA_UNAVAILABLE", "message": "Los resultados no están disponibles temporalmente."}) from exc
     output: list[CanonicalSignalResult] = []
