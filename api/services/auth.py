@@ -20,6 +20,23 @@ from api.services.telegram import TelegramBotAPI, TelegramDeliveryError
 UTC = timezone.utc
 ACCESS_COOKIE_NAME = "ftrade_refresh"
 REFRESH_DAYS = 30
+
+
+def refresh_in_body_enabled() -> bool:
+    """Whether refresh tokens are also returned in JSON (fallback for blocked cookies)."""
+    return os.getenv("AUTH_REFRESH_IN_BODY", "true").strip().lower() not in {"0", "false", "no", "off"}
+
+
+def refresh_grace_seconds() -> int:
+    """Window in which the just-rotated refresh token is still accepted once.
+
+    Covers a lost rotation response (page reload / closed tab / timeout) that would
+    otherwise log the user out. 0 disables the grace window.
+    """
+    try:
+        return max(0, min(300, int(os.getenv("AUTH_REFRESH_GRACE_SECONDS", "60"))))
+    except ValueError:
+        return 60
 CHALLENGE_MINUTES = 5
 RESEND_SECONDS = 60
 MAX_CODE_ATTEMPTS = 5
@@ -365,12 +382,19 @@ class AuthService:
         access = issue_access_token(user, session_id, now=now)
         return _normalize_user_for_response(user), access, refresh_token, is_new
 
-    def refresh(self, raw_refresh_token: str | None) -> tuple[str, str, datetime]:
-        if not raw_refresh_token:
+    def refresh(self, raw_refresh_token: str | None, fallback_token: str | None = None) -> tuple[str, str, datetime]:
+        candidates = [t for t in dict.fromkeys([raw_refresh_token, fallback_token]) if t]
+        if not candidates:
             raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "No hay una sesión de renovación válida."})
-        old_hash = hash_token(raw_refresh_token)
-        session = self.repository.get_session_by_refresh_hash(old_hash)
-        if not session:
+        grace = refresh_grace_seconds()
+        old_hash, session = None, None
+        for candidate in candidates:
+            candidate_hash = hash_token(candidate)
+            session = self.repository.get_session_by_refresh_hash(candidate_hash, grace_seconds=grace)
+            if session:
+                old_hash = candidate_hash
+                break
+        if not session or old_hash is None:
             raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "La sesión fue revocada o venció."})
         user = self.repository.get_user_by_id(str(session["user_id"]))
         if not user:
@@ -379,7 +403,7 @@ class AuthService:
         now = utcnow()
         new_token = secrets.token_urlsafe(48)
         expires_at = now + timedelta(days=REFRESH_DAYS)
-        rotated = self.repository.rotate_session(str(session["id"]), old_hash, hash_token(new_token), now=now, expires_at=expires_at)
+        rotated = self.repository.rotate_session(str(session["id"]), old_hash, hash_token(new_token), now=now, expires_at=expires_at, grace_seconds=grace)
         if not rotated:
             raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "La sesión fue revocada o ya se renovó."})
         return issue_access_token(user, str(session["id"]), now=now), new_token, expires_at
