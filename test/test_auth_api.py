@@ -85,6 +85,8 @@ def test_phone_telegram_code_creates_free_trial_user_and_httponly_refresh(monkey
         assert "ftrade_refresh" not in payload
         cookie = response.cookies.get("ftrade_refresh")
         assert cookie
+        # Fallback copy for browsers that block the cross-site cookie.
+        assert payload["refresh_token"] == cookie
         set_cookie = response.headers["set-cookie"].lower()
         assert "httponly" in set_cookie and "samesite=lax" in set_cookie
 
@@ -157,6 +159,7 @@ def test_patch_me_allows_only_preferences_and_rejects_bad_timezone(monkeypatch):
 
 
 def test_refresh_rotates_cookie_and_logout_revokes_access_session(monkeypatch):
+    monkeypatch.setenv("AUTH_REFRESH_GRACE_SECONDS", "0")
     app, repo, _telegram = configured(monkeypatch)
     with TestClient(app) as client:
         _token, code = challenge_and_link(client, repo)
@@ -176,6 +179,38 @@ def test_refresh_rotates_cookie_and_logout_revokes_access_session(monkeypatch):
         assert logout.status_code == 204
         check = client.get("/auth/me", headers={"Authorization": f"Bearer {new_access}"})
         assert check.status_code == 401
+
+
+def test_refresh_works_from_body_token_when_cookie_is_blocked(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    with TestClient(app) as client:
+        _token, code = challenge_and_link(client, repo)
+        login = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        stored = login.json()["refresh_token"]
+        client.cookies.clear()  # browser dropped the third-party cookie
+        refreshed = client.post("/auth/refresh", json={"refresh_token": stored})
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["refresh_token"] and refreshed.json()["refresh_token"] != stored
+        client.cookies.clear()
+        assert client.post("/auth/refresh").status_code == 401
+
+
+def test_lost_rotation_response_is_recovered_within_grace_window(monkeypatch):
+    monkeypatch.setenv("AUTH_REFRESH_GRACE_SECONDS", "60")
+    app, repo, _telegram = configured(monkeypatch)
+    with TestClient(app) as client:
+        _token, code = challenge_and_link(client, repo)
+        login = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        first = login.json()["refresh_token"]
+        client.cookies.clear()
+        assert client.post("/auth/refresh", json={"refresh_token": first}).status_code == 200
+        # The client never received that response and retries with the old token.
+        client.cookies.clear()
+        retry = client.post("/auth/refresh", json={"refresh_token": first})
+        assert retry.status_code == 200, retry.text
+        # An unknown token is still rejected.
+        client.cookies.clear()
+        assert client.post("/auth/refresh", json={"refresh_token": "x" * 40}).status_code == 401
 
 
 def test_bad_contact_is_rejected_and_code_has_five_attempt_limit(monkeypatch):
