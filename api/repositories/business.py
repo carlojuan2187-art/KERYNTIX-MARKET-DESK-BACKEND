@@ -29,6 +29,7 @@ class InMemoryBusinessRepository:
         self.referral_rewards: dict[str, dict[str, Any]] = {}
         self.tickets: dict[str, dict[str, Any]] = {}
         self.audit: list[dict[str, Any]] = []
+        self.settings: dict[str, dict[str, Any]] = {}
 
     def expire_payments(self, now: datetime) -> int:
         count = 0
@@ -259,6 +260,18 @@ class InMemoryBusinessRepository:
         docs.sort(key=lambda d: d.get("created_at") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return docs[:max(1, min(int(limit), 200))]
 
+    def get_setting(self, key: str) -> dict[str, Any] | None:
+        with self._lock:
+            value = self.settings.get(str(key))
+            return deepcopy(value) if value is not None else None
+
+    def set_setting(self, key: str, value: Mapping[str, Any] | None) -> None:
+        with self._lock:
+            if value is None:
+                self.settings.pop(str(key), None)
+            else:
+                self.settings[str(key)] = deepcopy(dict(value))
+
     def admin_summary(self, now: datetime) -> dict[str, int]:
         with self._lock:
             payments = list(self.payments.values())
@@ -283,6 +296,7 @@ class MongoBusinessRepository:
         self._referral_rewards = db[os.getenv("REFERRAL_REWARDS_COLLECTION", "referral_rewards")]
         self._tickets = db[os.getenv("SUPPORT_TICKETS_COLLECTION", "support_tickets")]
         self._audit = db[os.getenv("ADMIN_AUDIT_COLLECTION", "admin_audit")]
+        self._settings = db[os.getenv("APP_SETTINGS_COLLECTION", "app_settings")]
         self._ensure_indexes()
 
     def _ensure_indexes(self) -> None:
@@ -493,6 +507,20 @@ class MongoBusinessRepository:
         query = {"created_at": {"$lt": before}} if before is not None else {}
         cursor = self._audit.find(query).sort("created_at", -1).limit(max(1, min(int(limit), 200)))
         return [self._clean(d) or {} for d in cursor]
+
+    def get_setting(self, key: str) -> dict[str, Any] | None:
+        doc = self._settings.find_one({"_id": str(key)})
+        if not doc:
+            return None
+        result = dict(doc)
+        result.pop("_id", None)
+        return result
+
+    def set_setting(self, key: str, value: Mapping[str, Any] | None) -> None:
+        if value is None:
+            self._settings.delete_one({"_id": str(key)})
+        else:
+            self._settings.replace_one({"_id": str(key)}, dict(value), upsert=True)
 
     def admin_summary(self, now: datetime) -> dict[str, int]:
         pending = {"status": {"$in": ["pending", "verifying", "verified"]}}
