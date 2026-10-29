@@ -5,11 +5,11 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 
 from api.auth_schemas import (
     AuthResendRequest, PhoneChallengeRequest, PhoneChallengeResponse,
-    RefreshResponse, TelegramCheckResponse, UserPatchRequest, UserResponse,
+    RefreshRequest, RefreshResponse, TelegramCheckResponse, UserPatchRequest, UserResponse,
     VerifyCodeRequest, VerifyCodeResponse,
 )
 from api.security import Principal, current_principal
-from api.services.auth import ACCESS_COOKIE_NAME, AuthService
+from api.services.auth import ACCESS_COOKIE_NAME, AuthService, refresh_in_body_enabled
 from api.services.telegram import TelegramDeliveryError
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
@@ -36,7 +36,8 @@ def telegram_check(token: str, request: Request) -> dict:
 def verify_code(body: VerifyCodeRequest, request: Request, response: Response) -> dict:
     user, access_token, refresh_token, is_new = _service(request).verify_code(body.phone, body.code, request=request)
     _service(request).set_refresh_cookie(response, refresh_token)
-    return {"access_token": access_token, "user": user, "is_new": is_new}
+    return {"access_token": access_token, "user": user, "is_new": is_new,
+            "refresh_token": refresh_token if refresh_in_body_enabled() else None}
 
 
 @router.post("/resend")
@@ -45,15 +46,19 @@ def resend_code(body: AuthResendRequest, request: Request) -> dict:
 
 
 @router.post("/refresh", response_model=RefreshResponse)
-def refresh_session(request: Request, response: Response, refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> dict:
-    access_token, new_refresh, expires_at = _service(request).refresh(refresh_token)
+def refresh_session(request: Request, response: Response, body: RefreshRequest | None = None,
+                    refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> dict:
+    # The HttpOnly cookie is preferred; the body token is a fallback for browsers
+    # that drop third-party cookies (Safari/ITP, Brave, in-app browsers).
+    access_token, new_refresh, expires_at = _service(request).refresh(refresh_token, fallback_token=body.refresh_token if body else None)
     _service(request).set_refresh_cookie(response, new_refresh, expires_at=expires_at)
-    return {"access_token": access_token}
+    return {"access_token": access_token, "refresh_token": new_refresh if refresh_in_body_enabled() else None}
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(request: Request, response: Response, refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> Response:
-    revoked = _service(request).logout(refresh_token)
+def logout(request: Request, response: Response, body: RefreshRequest | None = None,
+           refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> Response:
+    revoked = _service(request).logout(refresh_token) or (bool(body and body.refresh_token) and _service(request).logout(body.refresh_token))
     _service(request).clear_refresh_cookie(response)
     if not revoked:
         raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "La sesión de renovación no existe o ya fue revocada."})
