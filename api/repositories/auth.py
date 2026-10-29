@@ -56,8 +56,8 @@ class AuthRepository(Protocol):
     def claim_plan_notice(self, user_id: str, kind: str, boundary: datetime, *, now: datetime, lease_until: datetime) -> tuple[str, str] | None: ...
     def finish_plan_notice(self, dedupe_key: str, claim_id: str, *, sent: bool, now: datetime, error: str | None = None) -> bool: ...
     def create_session(self, session: Mapping[str, Any]) -> None: ...
-    def get_session_by_refresh_hash(self, refresh_hash: str) -> dict[str, Any] | None: ...
-    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime) -> dict[str, Any] | None: ...
+    def get_session_by_refresh_hash(self, refresh_hash: str, *, grace_seconds: int = 0) -> dict[str, Any] | None: ...
+    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime, grace_seconds: int = 0) -> dict[str, Any] | None: ...
     def revoke_session_by_refresh_hash(self, refresh_hash: str, *, now: datetime) -> bool: ...
     def revoke_session(self, session_id: str, user_id: str, *, now: datetime) -> bool: ...
     def is_session_active(self, session_id: str, user_id: str, *, now: datetime) -> bool: ...
@@ -317,26 +317,36 @@ class InMemoryAuthRepository:
             sid = str(session["id"])
             self._sessions[sid] = deepcopy(dict(session))
 
-    def get_session_by_refresh_hash(self, refresh_hash: str) -> dict[str, Any] | None:
+    @staticmethod
+    def _matches_refresh(doc: Mapping[str, Any], refresh_hash: str, grace_seconds: int, now: datetime) -> bool:
+        if doc.get("refresh_hash") == refresh_hash:
+            return True
+        prev, rotated_at = doc.get("prev_refresh_hash"), doc.get("rotated_at")
+        return bool(grace_seconds > 0 and prev and prev == refresh_hash and rotated_at
+                    and (now - _aware(rotated_at)).total_seconds() <= grace_seconds)
+
+    def get_session_by_refresh_hash(self, refresh_hash: str, *, grace_seconds: int = 0) -> dict[str, Any] | None:
+        now = datetime.now(timezone.utc)
         with self._lock:
             for doc in self._sessions.values():
-                if doc.get("refresh_hash") == refresh_hash and not doc.get("revoked_at"):
+                if (not doc.get("revoked_at") and _aware(doc.get("expires_at")) > now
+                        and self._matches_refresh(doc, refresh_hash, grace_seconds, now)):
                     return deepcopy(doc)
         return None
 
-    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime) -> dict[str, Any] | None:
+    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime, grace_seconds: int = 0) -> dict[str, Any] | None:
         with self._lock:
             doc = self._sessions.get(str(session_id))
-            if not doc or doc.get("refresh_hash") != old_hash or doc.get("revoked_at") or _aware(doc.get("expires_at")) <= now:
+            if not doc or doc.get("revoked_at") or _aware(doc.get("expires_at")) <= now or not self._matches_refresh(doc, old_hash, grace_seconds, now):
                 return None
-            doc.update({"refresh_hash": new_hash, "expires_at": expires_at, "last_activity": now})
+            doc.update({"prev_refresh_hash": doc.get("refresh_hash"), "rotated_at": now, "refresh_hash": new_hash, "expires_at": expires_at, "last_activity": now})
             return deepcopy(doc)
 
     def revoke_session_by_refresh_hash(self, refresh_hash: str, *, now: datetime) -> bool:
         with self._lock:
             for doc in self._sessions.values():
-                if doc.get("refresh_hash") == refresh_hash and not doc.get("revoked_at"):
-                    doc.update({"revoked_at": now, "refresh_hash": None, "last_activity": now})
+                if refresh_hash in (doc.get("refresh_hash"), doc.get("prev_refresh_hash")) and not doc.get("revoked_at"):
+                    doc.update({"revoked_at": now, "refresh_hash": None, "prev_refresh_hash": None, "last_activity": now})
                     return True
         return False
 
@@ -345,7 +355,7 @@ class InMemoryAuthRepository:
             doc = self._sessions.get(str(session_id))
             if not doc or str(doc.get("user_id")) != str(user_id) or doc.get("revoked_at"):
                 return False
-            doc.update({"revoked_at": now, "refresh_hash": None, "last_activity": now})
+            doc.update({"revoked_at": now, "refresh_hash": None, "prev_refresh_hash": None, "last_activity": now})
             return True
 
     def is_session_active(self, session_id: str, user_id: str, *, now: datetime) -> bool:
@@ -748,25 +758,35 @@ class MongoAuthRepository:
     def create_session(self, session: Mapping[str, Any]) -> None:
         self._sessions.insert_one(dict(session))
 
-    def get_session_by_refresh_hash(self, refresh_hash: str) -> dict[str, Any] | None:
-        now = _now_utc()
-        return self._clean(self._sessions.find_one({"refresh_hash": refresh_hash, "revoked_at": {"$exists": False}, "expires_at": {"$gt": now}}))
+    @staticmethod
+    def _refresh_match(refresh_hash: str, grace_seconds: int, now: datetime) -> dict[str, Any]:
+        clauses: list[dict[str, Any]] = [{"refresh_hash": refresh_hash}]
+        if grace_seconds > 0:
+            clauses.append({"prev_refresh_hash": refresh_hash, "rotated_at": {"$gte": now - timedelta(seconds=grace_seconds)}})
+        return {"$or": clauses}
 
-    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime) -> dict[str, Any] | None:
+    def get_session_by_refresh_hash(self, refresh_hash: str, *, grace_seconds: int = 0) -> dict[str, Any] | None:
+        now = _now_utc()
+        query = {**self._refresh_match(refresh_hash, grace_seconds, now), "revoked_at": {"$exists": False}, "expires_at": {"$gt": now}}
+        return self._clean(self._sessions.find_one(query))
+
+    def rotate_session(self, session_id: str, old_hash: str, new_hash: str, *, now: datetime, expires_at: datetime, grace_seconds: int = 0) -> dict[str, Any] | None:
         from pymongo import ReturnDocument
         doc = self._sessions.find_one_and_update(
-            {"id": str(session_id), "refresh_hash": old_hash, "revoked_at": {"$exists": False}, "expires_at": {"$gt": now}},
-            {"$set": {"refresh_hash": new_hash, "expires_at": expires_at, "last_activity": now}},
+            {"id": str(session_id), **self._refresh_match(old_hash, grace_seconds, now), "revoked_at": {"$exists": False}, "expires_at": {"$gt": now}},
+            # Aggregation-pipeline update (MongoDB >= 4.2): the token being replaced
+            # becomes the grace-window token, whichever of the two was presented.
+            [{"$set": {"prev_refresh_hash": "$refresh_hash", "rotated_at": now, "refresh_hash": new_hash, "expires_at": expires_at, "last_activity": now}}],
             return_document=ReturnDocument.AFTER,
         )
         return self._clean(doc)
 
     def revoke_session_by_refresh_hash(self, refresh_hash: str, *, now: datetime) -> bool:
-        result = self._sessions.update_one({"refresh_hash": refresh_hash, "revoked_at": {"$exists": False}}, {"$set": {"revoked_at": now, "last_activity": now}, "$unset": {"refresh_hash": ""}})
+        result = self._sessions.update_one({"$or": [{"refresh_hash": refresh_hash}, {"prev_refresh_hash": refresh_hash}], "revoked_at": {"$exists": False}}, {"$set": {"revoked_at": now, "last_activity": now}, "$unset": {"refresh_hash": "", "prev_refresh_hash": ""}})
         return bool(result.modified_count)
 
     def revoke_session(self, session_id: str, user_id: str, *, now: datetime) -> bool:
-        result = self._sessions.update_one({"id": str(session_id), "user_id": str(user_id), "revoked_at": {"$exists": False}}, {"$set": {"revoked_at": now, "last_activity": now}, "$unset": {"refresh_hash": ""}})
+        result = self._sessions.update_one({"id": str(session_id), "user_id": str(user_id), "revoked_at": {"$exists": False}}, {"$set": {"revoked_at": now, "last_activity": now}, "$unset": {"refresh_hash": "", "prev_refresh_hash": ""}})
         return bool(result.modified_count)
 
     def is_session_active(self, session_id: str, user_id: str, *, now: datetime) -> bool:
