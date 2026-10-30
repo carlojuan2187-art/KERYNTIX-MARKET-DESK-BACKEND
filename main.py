@@ -1,6 +1,8 @@
 """FTrade API entrypoint: signals, market data, authentication and account sessions."""
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import base64
 import logging
 import os
@@ -63,7 +65,7 @@ from api.services.user_features import AlertPreferencesService, NotificationServ
 from api.services.web_push import PyWebPushGateway, WebPushService
 from worker.binance_rest import BinanceRestClient
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+configure_logging()
 logger = logging.getLogger("ftrade.api")
 
 PRODUCTION_REQUIRED_WORKERS = (

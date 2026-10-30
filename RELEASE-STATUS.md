@@ -72,3 +72,17 @@ Este paquete **consolida las fuentes en dos repositorios separados** y deja CI/p
 - El estado de salud del feed ahora mide la frescura del último precio real, no solamente la llegada de eventos auxiliares de funding/mark price.
 - El canal WebSocket reenvía volumen 24h y máximos/mínimos además del precio/cambio; el funding se publica solo si cambia la tasa, evitando cientos de frames redundantes por segundo.
 - Pruebas de regresión: no leer historia por cada tick, degradar estado cuando los precios se estancan aunque sigan llegando eventos auxiliares y transportar los campos de mercado en el canal WebSocket.
+
+
+## Actualización — cierre WebSocket y redacción de credenciales (30 de octubre de 2026)
+
+- El envío de frames y heartbeats ahora pasa por `_try_send_websocket_json`, que detecta los estados desconectados y trata `WebSocketDisconnect`, `RuntimeError` y `OSError` como finalización del transporte.
+- El fallo de envío ya no cae en el manejador de errores de transformación de eventos ni deja el bucle intentando escribir sobre un socket cerrado. La salida ejecuta el `finally` existente y cancela/recolecta las tareas de suscripción.
+- Se centralizó la configuración de logs para el proceso API y los workers. Las líneas HTTPX útiles de nivel INFO se mantienen para observar latencias y respuestas (incluido Binance), pero el token embebido en URLs de Telegram se sustituye por `[REDACTED]`. El detalle DEBUG de `httpcore` permanece desactivado.
+- Los errores de red de los clientes Telegram ya no encadenan excepciones HTTPX que puedan imprimir URLs con el token.
+- Pruebas nuevas: envío normal, socket desconectado, `WebSocketDisconnect`, `RuntimeError` tras close, `OSError`, redacción del token y conservación de URLs Binance.
+- Suite final en esta copia: **342 passed, 5 skipped** (`pytest -q`). Los skips requieren MongoDB/Redis reales o `python-telegram-bot`. `compileall` también finalizó correctamente.
+
+### Acción operativa obligatoria antes del próximo despliegue
+
+El log anterior contenía una URL del Bot API de Telegram con el token en su ruta. Considera comprometido el token anterior: revócalo en BotFather, genera uno nuevo y actualiza `TELEGRAM_AUTH_BOT_TOKEN` en todos los servicios Railway que ejecuten la API o workers Telegram. Reinicia esos servicios y confirma que los logs muestran `[REDACTED]` para las URLs Telegram. El parche evita nuevas filtraciones en los logs de aplicación, pero no revoca el token ni borra copias antiguas del log.
