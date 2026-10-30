@@ -49,8 +49,9 @@ class TelegramBotAPI:
                 raise TelegramDeliveryError("Telegram rechazó el envío del mensaje", retryable=retryable)
         except TelegramDeliveryError:
             raise
-        except (httpx.HTTPError, ValueError) as exc:
-            raise TelegramDeliveryError("No se pudo entregar el mensaje por Telegram", retryable=True) from exc
+        except (httpx.HTTPError, ValueError):
+            # Do not chain HTTPX exceptions: their request URL contains the bot token.
+            raise TelegramDeliveryError("No se pudo entregar el mensaje por Telegram", retryable=True) from None
 
     def bot_username(self) -> str:
         return os.getenv("TELEGRAM_AUTH_BOT_USERNAME", "").strip().lstrip("@")

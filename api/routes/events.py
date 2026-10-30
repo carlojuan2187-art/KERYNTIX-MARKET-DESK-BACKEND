@@ -13,6 +13,7 @@ from typing import Any, Mapping
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
+from starlette.websockets import WebSocketState
 
 from api.security import Principal, current_principal
 from domain.plans import evaluate_access
@@ -44,6 +45,28 @@ def _session_is_active(auth_repo: Any, session_id: str | None, user_id: str) -> 
     if not session_id:
         return os.getenv("FTRADE_ENV", "development").strip().lower() != "production"
     return bool(auth_repo.is_session_active(session_id, user_id, now=datetime.now(timezone.utc)))
+
+
+async def _try_send_websocket_json(websocket: WebSocket, payload: dict[str, Any]) -> bool:
+    """Send one frame, returning False when the peer/transport is already closed.
+
+    Starlette/Uvicorn can raise RuntimeError or OSError when a send races with a
+    disconnect. These are normal connection-lifecycle outcomes, not event-transform
+    failures; treating them as such caused repeated sends and log floods.
+    """
+    if (
+        websocket.client_state is not WebSocketState.CONNECTED
+        or websocket.application_state is not WebSocketState.CONNECTED
+    ):
+        return False
+    try:
+        await websocket.send_json(payload)
+    except WebSocketDisconnect:
+        return False
+    except (RuntimeError, OSError) as exc:
+        logger.debug("Transporte WebSocket cerrado durante el envío (%s)", type(exc).__name__)
+        return False
+    return True
 
 
 def _row_id(row: Mapping[str, Any]) -> str:
@@ -322,9 +345,16 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
             try:
                 source, item = await asyncio.wait_for(queue.get(), timeout=25.0)
             except asyncio.TimeoutError:
-                await websocket.send_json({"channel": "system", "event": "heartbeat", "payload": {},
-                                           "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")})
+                heartbeat = {
+                    "channel": "system",
+                    "event": "heartbeat",
+                    "payload": {},
+                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+                if not await _try_send_websocket_json(websocket, heartbeat):
+                    return
                 continue
+
             # Re-check current account restrictions at event time; a ban/expiry takes
             # effect without waiting for the short-lived WS ticket to expire.
             try:
@@ -334,20 +364,28 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
                     return
                 can_view_market = bool(evaluate_access(current_user, now=datetime.now(timezone.utc), is_admin=_is_admin(user_id, current_user)).get("allowed"))
                 frames = await _event_frames(websocket, source, item, user_id, can_view_market, last_ticks)
-                for frame in frames:
-                    await websocket.send_json(frame)
-            except WebSocketDisconnect:
-                raise
             except Exception:
+                # A malformed/unavailable event is isolated; the live connection can
+                # still receive subsequent valid events. Transport errors are handled
+                # only by _try_send_websocket_json below.
                 logger.exception("Fallo al transformar evento WebSocket (%s)", source)
+                continue
+
+            for frame in frames:
+                if not await _try_send_websocket_json(websocket, frame):
+                    return
     except WebSocketDisconnect:
         pass
     except Exception:
         logger.exception("Conexión WebSocket interrumpida")
-        try:
-            await websocket.close(code=1011, reason="Error interno del canal de eventos")
-        except Exception:
-            pass
+        if (
+            websocket.client_state is WebSocketState.CONNECTED
+            and websocket.application_state is WebSocketState.CONNECTED
+        ):
+            try:
+                await websocket.close(code=1011, reason="Error interno del canal de eventos")
+            except (RuntimeError, OSError, WebSocketDisconnect):
+                pass
     finally:
         for task in tasks:
             task.cancel()
