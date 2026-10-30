@@ -9,6 +9,8 @@ rarely lead to a repeated message.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -201,7 +203,7 @@ class TelegramNotificationDeliveryWorker:
 
 
 async def _run_worker() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     auth = auth_repository_from_environment()
     features = user_feature_repository_from_environment()
     cache = cache_from_environment()

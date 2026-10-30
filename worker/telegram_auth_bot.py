@@ -5,6 +5,8 @@ bot's token/polling process. No chat handlers or strategy logic are imported.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -49,10 +51,16 @@ class TelegramAuthBot:
         self.offset = 0
 
     def api(self, method: str, payload: dict[str, Any] | None = None, *, timeout: float = 12.0) -> Any:
-        response = self.client.post(f"{self.base_url}/{method}", json=payload or {}, timeout=timeout)
-        response.raise_for_status()
-        body = response.json()
-        if body.get("ok") is not True:
+        try:
+            response = self.client.post(f"{self.base_url}/{method}", json=payload or {}, timeout=timeout)
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPError:
+            # HTTPX exceptions include the full Telegram URL, which embeds the token.
+            raise RuntimeError(f"Telegram transport error in {method}") from None
+        except ValueError:
+            raise RuntimeError(f"Telegram returned invalid JSON in {method}") from None
+        if not isinstance(body, dict) or body.get("ok") is not True:
             raise RuntimeError(f"Telegram API error in {method}")
         return body.get("result")
 
@@ -186,7 +194,7 @@ class TelegramAuthBot:
 
 
 async def _run_worker() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     token = os.getenv("TELEGRAM_AUTH_BOT_TOKEN", "")
     token_norm = token.strip().lower()
     if not token or any(marker in token_norm for marker in ("replace-with", "placeholder", "change-me", "changeme")):

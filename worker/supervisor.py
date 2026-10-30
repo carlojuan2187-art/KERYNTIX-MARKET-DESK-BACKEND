@@ -6,6 +6,8 @@ The Telegram authentication polling bot runs separately via worker.telegram_auth
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import logging
 import os
 import signal
@@ -147,7 +149,7 @@ class WorkerSupervisor:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:

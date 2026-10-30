@@ -6,6 +6,8 @@ never opens its own Binance connection.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -428,7 +430,7 @@ async def run_user_alerts_loop() -> None:
 
 def main() -> None:
     import logging
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     asyncio.run(run_user_alerts_loop())
 
 

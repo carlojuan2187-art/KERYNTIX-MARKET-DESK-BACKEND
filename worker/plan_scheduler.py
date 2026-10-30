@@ -8,6 +8,8 @@ Run: python -m worker.plan_scheduler
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -33,7 +35,7 @@ logger = logging.getLogger("ftrade.plan_scheduler")
 
 
 async def _run() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     repository = auth_repository_from_environment()
     storage = repository.health()
     if not storage.get("persistent") and os.getenv("PLAN_MAINTENANCE_ALLOW_MEMORY", "false").lower() not in {"1", "true", "yes"}:

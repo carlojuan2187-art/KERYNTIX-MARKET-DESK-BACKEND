@@ -5,6 +5,8 @@ connection for all-market mini tickers and force orders, then writes shared Redi
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import json
 import logging
@@ -447,7 +449,7 @@ async def _run_worker() -> None:
 
 
 if __name__ == "__main__":  # pragma: no cover - manual worker process
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     try:
         asyncio.run(_run_worker())
     except KeyboardInterrupt:

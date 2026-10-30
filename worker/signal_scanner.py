@@ -6,6 +6,8 @@ for the web API after the bot's last-moment anti-late checks pass.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -464,7 +466,7 @@ class SignalScanner:
 
 
 async def _run_worker() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     repository = repository_from_environment()
     repo_health = repository.health()
     if not repo_health.get("persistent") and os.getenv("SIGNAL_ENGINE_ALLOW_MEMORY", "false").lower() not in {"1", "true", "yes"}:

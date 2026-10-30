@@ -6,6 +6,8 @@ implemented here. Notifications are published to Redis for web/API consumers.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -376,7 +378,7 @@ def _valid_positive(value: Any) -> bool:
 
 
 async def _run_worker() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     repository = lifecycle_repository_from_environment()
     health = repository.health()
     if not health.get("persistent") and os.getenv("LIFECYCLE_ALLOW_MEMORY", "false").lower() not in {"1", "true", "yes"}:

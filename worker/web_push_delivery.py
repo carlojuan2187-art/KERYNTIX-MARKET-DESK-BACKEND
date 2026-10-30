@@ -6,6 +6,8 @@ crash, so browsers should also deduplicate via the notification `tag`/id.
 """
 from __future__ import annotations
 
+from api.logging_config import configure_logging
+
 import asyncio
 import logging
 import os
@@ -320,7 +322,7 @@ async def _run_forever(cache: JsonCache) -> None:
 
 
 def main() -> None:
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+    configure_logging()
     stop = asyncio.Event()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
