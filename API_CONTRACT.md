@@ -106,7 +106,7 @@ Normalización: mayúsculas, quitar espacios y `/`, añadir USDT si falta, **sin
 | `GET /market/liquidations?window=15` | `window=5`, `15` o `60` | `LiquidationSummary` | 422 ventana; 503 recopilando |
 | `GET /market/movers?window=15` | `window=5`, `15` o `60` | `MoversSnapshot` | 422 ventana; 503 recopilando |
 
-`MarketRegime` y `DerivativesData` conservan los modelos de `src/api/types.ts`. La clasificación es una de `TENDENCIA ALCISTA|TENDENCIA BAJISTA|RANGO|TRANSICIÓN|ALTA VOLATILIDAD`. Régimen se refresca cada 5 minutos. Las proporciones de cuentas y top traders están en porcentajes; `mark_index_delta` es un porcentaje.
+`MarketRegime` y `DerivativesData` conservan los modelos de `src/api/types.ts`. La clasificación es una de `TENDENCIA ALCISTA|TENDENCIA BAJISTA|RANGO|TRANSICIÓN|ALTA VOLATILIDAD`. Régimen se refresca cada 5 minutos. La proporción global de cuentas está en porcentajes; `mark_index_delta` es un porcentaje. Los datos Top Traders no forman parte de la vista web de derivados.
 
 `CalendarEventItem = {id,title,date,impact:"alto"|"medio"|"bajo",category,countdown?}`. El cliente calcula la cuenta regresiva desde `date`. Deribit: viernes 08:00 UTC; mensual, último viernes del mes; trimestral en marzo/junio/septiembre/diciembre. La ventana 30 omite los semanales. Las fechas macro del mock son relativas y no reales.
 
@@ -224,7 +224,7 @@ Estos endpoints ya están implementados en FastAPI, pero las páginas React cont
 | Método y ruta | Respuesta | Notas |
 |---|---|---|
 | `GET /market/regime` | `MarketRegime` más `timeframes`, `confidence`, `score`, `reference`, `breadth` y `guidance` | Calcula con el módulo original `regime.py`, usando velas de Binance Futures 15m/1h/4h. Puede responder 503 si no hay suficiente histórico o falla la fuente principal. |
-| `GET /derivatives?symbol=BTCUSDT` | `DerivativesData` más `raw`, `sources` y `updated_at` | Funding actual e histórico, interés abierto actual e histórico, cambios de OI solo si hay cobertura suficiente, ratios de cuentas y top traders (con `BINANCE_API_KEY` solo del lado backend), flujo taker por ventana, base del contrato y metadatos de frescura. Las métricas individuales se permiten `null` si su fuente no responde; no se sustituyen por ceros. |
+| `GET /derivatives?symbol=BTCUSDT` | `DerivativesData` más `raw`, `sources` y `updated_at` | Funding actual e histórico, interés abierto actual e histórico, cambios de OI solo si hay cobertura suficiente, ratio global de cuentas, flujo taker por ventana, base del contrato por período y anualizada cuando Binance la reporte, y metadatos de frescura. Los datos Top Traders no forman parte de la vista pública de derivados. Las métricas individuales se permiten `null` si su fuente no responde; no se sustituyen por ceros. |
 | `GET /market/flow?symbol=BTCUSDT` | `FlowData` más `source`, `status`, `updated_at` y `raw` | Requiere velas reales de 5m; entrega ventanas 15m/1h/4h y puntos CVD con OHLCV muestreado. `time` se formatea según la zona horaria del usuario, `timestamp` son milisegundos Unix. |
 | `GET /calendar?view=7` | `CalendarEventItem[]` | `view` admite 7 o 30 días. Combina FOMC, vencimientos Deribit, CPI/NFP de BLS cuando la fuente está disponible y el próximo funding de BTC si Binance lo devuelve. `X-FTrade-Calendar-BLS` permite observar disponibilidad/degradación de BLS. |
 
