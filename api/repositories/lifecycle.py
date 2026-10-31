@@ -41,7 +41,7 @@ class LifecycleRepository(Protocol):
     def save_result_if_absent(self, result: Mapping[str, Any]) -> bool: ...
     def compare_and_set_outcome(
         self, signal: Mapping[str, Any], previous_tracked_until: datetime | None,
-        outcome: Mapping[str, Any],
+        outcome: Mapping[str, Any], previous_live_price_at: datetime | None = None,
     ) -> bool: ...
     def list_results(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
     def health(self) -> dict[str, Any]: ...
@@ -106,7 +106,7 @@ class InMemoryLifecycleRepository:
             return True
 
     def compare_and_set_outcome(self, signal: Mapping[str, Any], previous_tracked_until: datetime | None,
-                                outcome: Mapping[str, Any]) -> bool:
+                                outcome: Mapping[str, Any], previous_live_price_at: datetime | None = None) -> bool:
         with self._lock:
             index = self._find_index(signal)
             if index is None:
@@ -118,6 +118,10 @@ class InMemoryLifecycleRepository:
             actual = utc_naive(old_outcome.get("tracked_until"))
             expected = utc_naive(previous_tracked_until)
             if actual != expected:
+                return False
+            actual_live = utc_naive(old_outcome.get("last_live_price_at"))
+            expected_live = utc_naive(previous_live_price_at)
+            if actual_live != expected_live:
                 return False
             for key, value in outcome.items():
                 if key == "recipient_ids":
@@ -244,7 +248,7 @@ class MongoLifecycleRepository:
             return False
 
     def compare_and_set_outcome(self, signal: Mapping[str, Any], previous_tracked_until: datetime | None,
-                                outcome: Mapping[str, Any]) -> bool:
+                                outcome: Mapping[str, Any], previous_live_price_at: datetime | None = None) -> bool:
         selector = self._selector(signal)
         selector["status"] = STATUS_TOUCHED
         expected = utc_naive(previous_tracked_until)
@@ -255,6 +259,14 @@ class MongoLifecycleRepository:
             ]
         else:
             selector["outcome.tracked_until"] = expected
+        expected_live = utc_naive(previous_live_price_at)
+        if expected_live is None:
+            selector["$and"] = [{"$or": [
+                {"outcome.last_live_price_at": None},
+                {"outcome.last_live_price_at": {"$exists": False}},
+            ]}]
+        else:
+            selector["outcome.last_live_price_at"] = expected_live
         fields = {f"outcome.{key}": value for key, value in outcome.items() if key != "recipient_ids"}
         if outcome.get("result") in {"TP1", "TP2", "SL"}:
             fields["operation_result"] = outcome["result"]
