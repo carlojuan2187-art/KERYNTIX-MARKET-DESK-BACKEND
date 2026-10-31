@@ -355,6 +355,17 @@ def create_app(
     app.state.market_intelligence_service = market_intelligence_service
     app.state.cancelled_display_minutes = max(5, int(os.getenv("CANCELLED_DISPLAY_MINUTES", "30")))
 
+    @app.middleware("http")
+    async def security_response_headers(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        if os.getenv("FTRADE_ENV", "development").strip().lower() == "production":
+            response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+        return response
+
     cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
     if cors_origins:
         app.add_middleware(
