@@ -37,6 +37,7 @@ class AuthRepository(Protocol):
     def increment_auth_attempts(self, token_hash: str, *, now: datetime, field: str = "attempts", maximum: int = 5) -> dict[str, Any] | None: ...
     def find_recent_phone_request(self, phone: str, *, since: datetime) -> dict[str, Any] | None: ...
     def count_recent_auth_requests_by_ip(self, ip_hash: str, *, since: datetime) -> int: ...
+    def count_recent_password_attempts(self, *, phone: str | None = None, ip_hash: str | None = None, since: datetime) -> int: ...
     def get_user_by_phone(self, phone: str) -> dict[str, Any] | None: ...
     def get_user_by_id(self, user_id: str) -> dict[str, Any] | None: ...
     def get_user_by_telegram_chat_id(self, chat_id: str) -> dict[str, Any] | None: ...
@@ -90,7 +91,7 @@ class InMemoryAuthRepository:
 
     def get_latest_login_request_for_phone(self, phone: str) -> dict[str, Any] | None:
         with self._lock:
-            found = [d for d in self._auth_requests.values() if d.get("flow") == "login" and d.get("phone") == phone]
+            found = [d for d in self._auth_requests.values() if d.get("flow") in {"login", "register"} and d.get("phone") == phone]
             found.sort(key=lambda d: _aware(d.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
             return deepcopy(found[0]) if found else None
 
@@ -136,13 +137,23 @@ class InMemoryAuthRepository:
 
     def find_recent_phone_request(self, phone: str, *, since: datetime) -> dict[str, Any] | None:
         with self._lock:
-            found = [d for d in self._auth_requests.values() if d.get("flow") == "login" and d.get("phone") == phone and _aware(d.get("created_at")) and _aware(d.get("created_at")) >= since]
+            found = [d for d in self._auth_requests.values() if d.get("flow") in {"login", "register"} and d.get("phone") == phone and _aware(d.get("created_at")) and _aware(d.get("created_at")) >= since]
             found.sort(key=lambda d: _aware(d["created_at"]), reverse=True)
             return deepcopy(found[0]) if found else None
 
     def count_recent_auth_requests_by_ip(self, ip_hash: str, *, since: datetime) -> int:
         with self._lock:
-            return sum(1 for d in self._auth_requests.values() if d.get("flow") == "login" and d.get("requester_ip_hash") == ip_hash and _aware(d.get("created_at")) and _aware(d.get("created_at")) >= since)
+            return sum(1 for d in self._auth_requests.values() if d.get("flow") in {"login", "register"} and d.get("requester_ip_hash") == ip_hash and _aware(d.get("created_at")) and _aware(d.get("created_at")) >= since)
+
+    def count_recent_password_attempts(self, *, phone: str | None = None, ip_hash: str | None = None, since: datetime) -> int:
+        with self._lock:
+            return sum(
+                1 for d in self._auth_requests.values()
+                if d.get("flow") == "password_login"
+                and (phone is None or d.get("phone") == phone)
+                and (ip_hash is None or d.get("requester_ip_hash") == ip_hash)
+                and _aware(d.get("created_at")) and _aware(d.get("created_at")) >= since
+            )
 
     def get_user_by_phone(self, phone: str) -> dict[str, Any] | None:
         with self._lock:
@@ -493,7 +504,7 @@ class MongoAuthRepository:
         return self._clean(self._auth_requests.find_one({"token_hash": token_hash}))
 
     def get_latest_login_request_for_phone(self, phone: str) -> dict[str, Any] | None:
-        return self._clean(self._auth_requests.find_one({"phone": phone, "flow": "login"}, sort=[("created_at", -1)]))
+        return self._clean(self._auth_requests.find_one({"phone": phone, "flow": {"$in": ["login", "register"]}}, sort=[("created_at", -1)]))
 
     def get_pending_request_for_chat(self, chat_id: str) -> dict[str, Any] | None:
         now = _now_utc()
@@ -523,10 +534,18 @@ class MongoAuthRepository:
         return self._clean(doc)
 
     def find_recent_phone_request(self, phone: str, *, since: datetime) -> dict[str, Any] | None:
-        return self._clean(self._auth_requests.find_one({"phone": phone, "flow": "login", "created_at": {"$gte": since}}, sort=[("created_at", -1)]))
+        return self._clean(self._auth_requests.find_one({"phone": phone, "flow": {"$in": ["login", "register"]}, "created_at": {"$gte": since}}, sort=[("created_at", -1)]))
 
     def count_recent_auth_requests_by_ip(self, ip_hash: str, *, since: datetime) -> int:
-        return int(self._auth_requests.count_documents({"flow": "login", "requester_ip_hash": ip_hash, "created_at": {"$gte": since}}))
+        return int(self._auth_requests.count_documents({"flow": {"$in": ["login", "register"]}, "requester_ip_hash": ip_hash, "created_at": {"$gte": since}}))
+
+    def count_recent_password_attempts(self, *, phone: str | None = None, ip_hash: str | None = None, since: datetime) -> int:
+        query: dict[str, Any] = {"flow": "password_login", "created_at": {"$gte": since}}
+        if phone is not None:
+            query["phone"] = phone
+        if ip_hash is not None:
+            query["requester_ip_hash"] = ip_hash
+        return int(self._auth_requests.count_documents(query))
 
     def get_user_by_phone(self, phone: str) -> dict[str, Any] | None:
         return self._clean(self._users.find_one({"phone": phone}))
