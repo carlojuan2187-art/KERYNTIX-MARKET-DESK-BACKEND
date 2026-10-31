@@ -41,9 +41,11 @@ def evaluate_access(user: Mapping[str, Any], *, now: datetime | None = None, is_
 
     Administrators are authorized by server-side configuration and bypass plan
     and ban gates. Non-admin users are blocked by an active ban; otherwise they
-    get analytical access while either their Premium subscription or trial is
-    active. A stored `banned=True` with an expired `ban_until` is not an active
-    ban.
+    get the full Premium feature set while either their Premium subscription or
+    five-day trial is active. The trial is not a limited/free tier. Once both
+    entitlements expire, analytical/platform features are blocked while account
+    and billing remain available so the user can renew. A stored `banned=True`
+    with an expired `ban_until` is not an active ban.
     """
     current = as_utc(now or datetime.now(UTC)) or datetime.now(UTC)
     plan = str(user.get("plan") or "free").strip().lower()
@@ -55,6 +57,8 @@ def evaluate_access(user: Mapping[str, Any], *, now: datetime | None = None, is_
     stored_banned = bool(user.get("banned", False))
     ban_active = stored_banned and (ban_until is None or ban_until > current)
     premium_active = plan == "premium" and plan_end is not None and plan_end > current
+    # The trial carries exactly the same feature permissions as a paid Premium
+    # plan until its persisted expiry timestamp. The expiry boundary is exclusive.
     trial_active = trial_end is not None and trial_end > current
 
     if is_admin:
