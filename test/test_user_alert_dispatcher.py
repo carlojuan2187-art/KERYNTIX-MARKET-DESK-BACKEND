@@ -20,10 +20,10 @@ class NoTelegram:
         raise AssertionError("no se debe invocar un Telegram no configurado")
 
 
-def make_user(repo, user_id="watch-alert-user", *, prefs=None, active=True, chat_id=None, language="en"):
+def make_user(repo, user_id="watch-alert-user", *, prefs=None, active=True, chat_id=None, language="en", phone=None):
     now = datetime.now(UTC)
     repo.create_user_if_absent({
-        "user_id": user_id, "phone": "+1787555" + str(abs(hash(user_id)) % 100000).zfill(5), "telegram_chat_id": chat_id,
+        "user_id": user_id, "phone": phone or ("+1787555" + str(abs(hash(user_id)) % 100000).zfill(5)), "telegram_chat_id": chat_id,
         "plan": "premium" if active else "free",
         "plan_end": now + timedelta(days=10) if active else None,
         "trial_end": None, "banned": False, "ref_code": f"ref-{user_id}",
@@ -299,7 +299,7 @@ def test_signal_notifications_paginate_beyond_first_500_users_without_task_fanou
         "liq": True, "mov": True, "vol": True,
     }
     for index in range(123):
-        make_user(auth, f"scale-user-{index:04d}", prefs=prefs)
+        make_user(auth, f"scale-user-{index:04d}", prefs=prefs, phone=f"+1787556{index:05d}")
     features = InMemoryUserFeatureRepository()
     processor = UserAlertProcessor(
         auth, features, InMemoryJsonCache(), NoTelegram(), page_size=50, notify_concurrency=7,

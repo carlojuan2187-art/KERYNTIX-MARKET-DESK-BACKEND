@@ -90,3 +90,39 @@ def test_all_time_stats_do_not_use_the_500_row_api_listing_cap():
     rows = [_result(i, "TP1", 1.0, now - timedelta(minutes=i)) for i in range(650)]
     result = build_performance(rows, period="all", now=now)
     assert result["operations"] == 650
+
+
+def test_performance_prefers_explicit_simulated_exit_and_counts_legacy_snapshots():
+    now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+    current = _result(1, "TP1", 2.0, now - timedelta(minutes=2))
+    current.update({
+        "exit_price": 102.0,
+        "calculation_version": "2.0",
+        "execution_model": "SIMULATED_FULL_POSITION_TP1_PROTECTION",
+        "entry_reference": "entry_price",
+        "exit_via": "TP1_PROTECTIVE_STOP_LIVE_PRICE",
+    })
+    legacy = _result(2, "SL", -1.0, now - timedelta(minutes=1))
+
+    result = build_performance([current, legacy], period="all", now=now)
+
+    trade_by_id = {trade["id"]: trade for trade in result["trades"]}
+    assert trade_by_id["signal-1"]["exit_price"] == 102.0
+    assert trade_by_id["signal-1"]["calculation_version"] == "2.0"
+    assert trade_by_id["signal-1"]["exit_via"] == "TP1_PROTECTIVE_STOP_LIVE_PRICE"
+    assert trade_by_id["signal-2"]["calculation_version"] == "legacy_v1"
+    assert result["legacy_results"] == 1
+    assert result["calculation_version"] == "2.0"
+
+
+def test_performance_response_preserves_ambiguous_candle_resolution_flag():
+    now = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+    row = _result(1, "TP1", 2.0, now - timedelta(minutes=1))
+    row.update({
+        "exit_price": 102.0, "calculation_version": "2.0",
+        "execution_model": "SIMULATED_FULL_POSITION_TP1_PROTECTION",
+        "exit_via": "TP1_TP2_SAME_CANDLE_PROTECTIVE_AMBIGUOUS",
+        "ambiguous": True,
+    })
+    result = build_performance([row], period="all", now=now)
+    assert result["trades"][0]["ambiguous"] is True

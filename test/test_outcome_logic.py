@@ -25,9 +25,11 @@ def run(signal, candles, now=None):
 
 def test_real_r_is_calculated_from_modeled_fill():
     levels = trade_levels(long_signal())
-    assert levels["fill"] == 100.2
-    assert round(levels["r_tp1"], 4) == round(1.3 / 1.2, 4)
-    assert round(levels["r_tp2"], 4) == round(2.8 / 1.2, 4)
+    assert levels["fill"] == 100.1
+    assert levels["entry_reference"] == "entry_price"
+    assert round(levels["risk"], 4) == 1.1
+    assert round(levels["r_tp1"], 4) == round(1.4 / 1.1, 4)
+    assert round(levels["r_tp2"], 4) == round(2.9 / 1.1, 4)
 
 
 def test_sl_first_is_minus_one_r():
@@ -38,9 +40,9 @@ def test_sl_first_is_minus_one_r():
 
 
 def test_tp1_then_tp2_closes_at_tp2_multiple():
-    result = run(long_signal(), [candle(0, 101.6, 100.3), candle(1, 103.2, 101.0)])
+    result = run(long_signal(), [candle(0, 101.6, 100.3), candle(1, 103.2, 101.6)])
     assert result["closed"]["result"] == "TP2"
-    assert round(result["closed"]["r_real"], 4) == round(2.8 / 1.2, 4)
+    assert round(result["closed"]["r_real"], 4) == round(2.9 / 1.1, 4)
     assert result["outcome"]["state"] == STATE_CLOSED
 
 
@@ -48,7 +50,8 @@ def test_tp1_then_sl_remains_tp1_win():
     result = run(long_signal(), [candle(0, 101.6, 100.3), candle(1, 100.9, 98.8)])
     assert result["closed"]["result"] == "TP1"
     assert result["closed"]["outcome"] == "win"
-    assert result["events"][-1]["via"] == "SL_AFTER_TP1"
+    assert result["events"][-1]["via"] == "TP1_PROTECTIVE_STOP"
+    assert result["closed"]["exit_price"] == 101.5
 
 
 def test_tp1_only_updates_state_without_closing_when_tp2_exists():
@@ -85,9 +88,102 @@ def test_invalid_geometry_closes_invalid_without_false_trade_result():
 
 
 def test_result_document_uses_web_canonical_id():
-    result = run(long_signal(), [candle(0, 101.6, 100.3), candle(1, 103.2, 101.0)])
+    result = run(long_signal(), [candle(0, 101.6, 100.3), candle(1, 103.2, 101.6)])
     doc = build_result_doc(long_signal(), result["levels"], result["closed"])
     assert doc["signal_id"] == "signal-uuid"
     assert doc["id"] == "signal-uuid"
     assert doc["result"] == "TP2"
     assert doc["take_profits"] == [101.5, 103.0]
+
+
+def test_tp1_protection_closes_on_retest_without_touching_original_sl():
+    signal = long_signal()
+    result = run(signal, [
+        candle(0, 101.6, 100.3),  # TP1 reached and protection armed at candle close
+        candle(1, 101.8, 101.4),  # retest of TP1; original SL at 99 is untouched
+    ])
+    assert result["closed"]["result"] == "TP1"
+    assert result["closed"]["exit_price"] == 101.5
+    assert result["closed"]["via"] == "TP1_PROTECTIVE_STOP"
+
+
+def test_tp1_protection_short_closes_on_retest():
+    signal = long_signal()
+    signal.update({
+        "direction": "SHORT", "entry_price": 100.1,
+        "entry_zone": {"low": 100.0, "high": 100.2},
+        "stop_loss": 101.2, "take_profits": [98.7, 97.2],
+    })
+    first = {"open_time": T0, "close_time": T0 + timedelta(seconds=59), "high": 100.1, "low": 98.6}
+    second = {"open_time": T0 + timedelta(minutes=1), "close_time": T0 + timedelta(minutes=1, seconds=59), "high": 98.8, "low": 98.0}
+    result = run(signal, [first, second])
+    assert result["closed"]["result"] == "TP1"
+    assert result["closed"]["exit_price"] == 98.7
+    assert result["closed"]["via"] == "TP1_PROTECTIVE_STOP"
+
+
+def test_tp1_and_tp2_with_retest_in_same_candle_resolves_conservatively_at_tp1():
+    signal = long_signal()
+    result = run(signal, [
+        candle(0, 101.6, 100.3),
+        candle(1, 103.2, 101.4),
+    ])
+    assert result["closed"]["result"] == "TP1"
+    assert result["closed"]["ambiguous"] is True
+    assert result["closed"]["exit_price"] == 101.5
+
+
+def test_live_price_advances_tp1_then_closes_on_live_retest():
+    signal = long_signal()
+    first_at = T0 + timedelta(seconds=5)
+    first = advance_trade(signal, [], now=first_at, live_price=101.6, live_price_at=first_at)
+    assert first["closed"] is None
+    assert first["outcome"]["state"] == STATE_TP1_HIT
+    assert first["outcome"]["protective_stop_price"] == 101.5
+
+    signal["outcome"] = first["outcome"]
+    second_at = T0 + timedelta(seconds=7)
+    second = advance_trade(signal, [], now=second_at, live_price=101.5, live_price_at=second_at)
+    assert second["closed"]["result"] == "TP1"
+    assert second["closed"]["exit_price"] == 101.5
+    assert second["closed"]["r_real"] == first["events"][0]["r_tp1"]
+
+
+def test_result_snapshot_labels_simulated_model_and_separates_actual_zone_touch():
+    signal = long_signal()
+    signal["touch_price"] = 100.18
+    step = run(signal, [candle(0, 101.6, 100.3), candle(1, 101.7, 101.4)])
+    doc = build_result_doc(signal, step["levels"], step["closed"])
+
+    assert doc["entry_fill"] == 100.1
+    assert doc["entry_reference"] == "entry_price"
+    assert doc["touch_price"] == 100.18
+    assert doc["exit_price"] == 101.5
+    assert doc["exit_via"] == "TP1_PROTECTIVE_STOP"
+    assert doc["calculation_version"] == "2.0"
+    assert doc["execution_model"] == "SIMULATED_FULL_POSITION_TP1_PROTECTION"
+    assert doc["r_real"] == step["closed"]["r_real"]
+
+
+def test_tp1_tp2_and_return_to_tp1_in_same_candle_closes_conservatively_at_tp1():
+    result = run(long_signal(), [candle(0, 103.2, 101.4)])
+    assert result["closed"]["result"] == "TP1"
+    assert result["closed"]["ambiguous"] is True
+    assert result["closed"]["exit_price"] == 101.5
+
+
+def test_sl_inside_live_tp1_activation_candle_is_conservative_minus_one_r():
+    signal = long_signal()
+    activation_at = T0 + timedelta(seconds=30)
+    signal["outcome"].update({
+        "state": STATE_TP1_HIT,
+        "tp1_at": activation_at,
+        "protection_armed_at": activation_at,
+        "protective_stop_price": 101.5,
+        "last_live_price_at": activation_at,
+    })
+    result = run(signal, [candle(0, 101.6, 98.8)])
+    assert result["closed"]["result"] == "SL"
+    assert result["closed"]["r_real"] == -1.0
+    assert result["closed"]["ambiguous"] is True
+    assert result["closed"]["via"] == "SL_TP1_ACTIVATION_CANDLE_AMBIGUOUS"

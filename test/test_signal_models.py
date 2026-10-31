@@ -100,7 +100,7 @@ def test_adapter_preserves_engine_metadata_and_scoring():
     # The original bot's currently allow-listed document may not contain targets;
     # the adapter must not hallucinate them.
     assert signal.targets == []
-    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.5)
+    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.0)
 
 
 def test_legacy_naive_datetimes_are_normalized_as_utc():
@@ -115,11 +115,11 @@ def test_legacy_naive_datetimes_are_normalized_as_utc():
 def test_touch_price_is_not_modeled_entry_fill():
     signal = adapt_bot_signal(legacy_signal())
     assert signal.lifecycle.touch_price == pytest.approx(100.5)
-    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.5)
+    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.0)
     # Use different observed quote to explicitly ensure the fields are not aliases.
     signal = adapt_bot_signal(legacy_signal(touch_price=100.42))
     assert signal.lifecycle.touch_price == pytest.approx(100.42)
-    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.5)
+    assert signal.trade_metrics.modeled_entry_fill == pytest.approx(100.0)
 
 
 def test_pending_signal_does_not_report_fill_metrics_as_realized():
@@ -153,10 +153,10 @@ def test_long_trade_levels_match_current_tracker_geometry_and_r():
     signal = adapt_bot_signal(legacy_signal())
     levels = compute_trade_levels(signal)
     assert levels is not None
-    assert levels["fill"] == pytest.approx(100.5)  # LONG enters at zone high
-    assert levels["risk"] == pytest.approx(2.5)
-    assert levels["r_tp1"] == pytest.approx(2.0)
-    assert levels["r_tp2"] == pytest.approx(4.0)
+    assert levels["fill"] == pytest.approx(100.0)  # canonical strategy entry, not zone edge
+    assert levels["risk"] == pytest.approx(2.0)
+    assert levels["r_tp1"] == pytest.approx(2.75)
+    assert levels["r_tp2"] == pytest.approx(5.25)
 
 
 def test_short_trade_levels_use_zone_low_and_reverse_target_order():
@@ -169,10 +169,10 @@ def test_short_trade_levels_use_zone_low_and_reverse_target_order():
     signal = adapt_bot_signal(raw)
     levels = compute_trade_levels(signal)
     assert levels is not None
-    assert levels["fill"] == pytest.approx(99.5)
-    assert levels["risk"] == pytest.approx(2.5)
-    assert levels["r_tp1"] == pytest.approx(2.0)
-    assert levels["r_tp2"] == pytest.approx(3.6)
+    assert levels["fill"] == pytest.approx(100.0)
+    assert levels["risk"] == pytest.approx(2.0)
+    assert levels["r_tp1"] == pytest.approx(2.75)
+    assert levels["r_tp2"] == pytest.approx(4.75)
     assert lifecycle_geometry_issues(signal) == []
 
 
@@ -182,7 +182,7 @@ def test_tracker_uses_first_two_positive_targets_and_does_not_invent_tp3():
     assert levels["tp1"] == pytest.approx(105.5)
     assert levels["tp2"] == pytest.approx(110.5)
     assert len(signal.take_profits) == 3  # contract preserves original list
-    assert signal.trade_metrics.r_by_target_from_modeled_fill == pytest.approx([2.0, 4.0])
+    assert signal.trade_metrics.r_by_target_from_modeled_fill == pytest.approx([2.75, 5.25])
 
 
 def test_bad_target_order_is_untrackable_not_reordered():
@@ -239,3 +239,31 @@ def test_result_adapter_rejects_win_loss_mismatch():
     }
     with pytest.raises(ValidationError):
         adapt_bot_result(raw)
+
+
+def test_result_adapter_preserves_v2_execution_and_tp2_metadata():
+    raw = {
+        "id": "result-v2", "signal_id": "signal-v2", "symbol": "BTCUSDT",
+        "direction": "LONG", "visibility": "premium", "entry_fill": 100.0,
+        "entry_zone": {"low": 99.5, "high": 100.5}, "stop_loss": 98.0,
+        "take_profits": [105.5, 110.5], "risk": 2.0, "r_tp1": 2.75,
+        "r_tp2": 5.25, "result": "TP2", "outcome": "win", "r_real": 5.25,
+        "ambiguous": False, "score": 90,
+        "created_at": datetime(2026, 10, 25, 12, 1),
+        "touched_at": datetime(2026, 10, 25, 12, 2),
+        "tp1_at": datetime(2026, 10, 25, 12, 3),
+        "tp2_at": datetime(2026, 10, 25, 12, 4),
+        "closed_at": datetime(2026, 10, 25, 12, 5),
+        "evaluated_at": datetime(2026, 10, 25, 12, 5),
+        "entry_reference": "entry_price", "exit_price": 110.5,
+        "exit_via": "TP2_LIVE_PRICE", "calculation_version": "2.0",
+        "execution_model": "SIMULATED_FULL_POSITION_TP1_PROTECTION",
+        "duration_minutes": 3.0,
+    }
+    result = adapt_bot_result(raw)
+    assert result.tp2_at == datetime(2026, 10, 25, 12, 4, tzinfo=timezone.utc)
+    assert result.entry_reference == "entry_price"
+    assert result.exit_price == pytest.approx(110.5)
+    assert result.exit_via == "TP2_LIVE_PRICE"
+    assert result.calculation_version == "2.0"
+    assert result.execution_model == "SIMULATED_FULL_POSITION_TP1_PROTECTION"

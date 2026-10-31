@@ -80,7 +80,7 @@ async def test_open_trade_closes_tp2_persists_immutable_result_and_r():
     now = utc_now()
     signal = touched_signal(now)
     candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
-    market = FakeMarket([kline(candle_open, high=105.5, low=102.0, close=105.2)])
+    market = FakeMarket([kline(candle_open, high=105.5, low=103.1, close=105.2)])
     cache = InMemoryJsonCache()
     repository = InMemoryLifecycleRepository([signal])
     worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now, outcome_check_seconds=5)
@@ -103,7 +103,7 @@ async def test_repeat_outcome_processing_is_idempotent_after_close():
     now = utc_now()
     signal = touched_signal(now)
     candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
-    market = FakeMarket([kline(candle_open, high=105.5, low=102.0, close=105.2)])
+    market = FakeMarket([kline(candle_open, high=105.5, low=103.1, close=105.2)])
     cache = InMemoryJsonCache()
     repository = InMemoryLifecycleRepository([signal])
     worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now, outcome_check_seconds=5)
@@ -124,7 +124,7 @@ async def test_open_trades_reuse_one_candle_fetch_per_symbol():
         row["outcome"] = dict(base["outcome"])
         signals.append(row)
     candle_open = base["outcome"]["tracked_until"] + timedelta(minutes=1)
-    market = FakeMarket([kline(candle_open, high=105.5, low=102.0, close=105.2)])
+    market = FakeMarket([kline(candle_open, high=105.5, low=103.1, close=105.2)])
     cache = InMemoryJsonCache()
     repository = InMemoryLifecycleRepository(signals)
     worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now, outcome_check_seconds=5)
@@ -166,3 +166,136 @@ async def test_shared_lifecycle_history_chunks_old_ranges_so_recent_signals_are_
     assert len(ranges) > 1
     assert ranges[-1][2] == now.replace(tzinfo=None)
     assert ranges[-1][1] <= now.replace(tzinfo=None) - timedelta(minutes=4)
+
+
+@pytest.mark.asyncio
+async def test_open_trade_uses_fresh_websocket_prices_for_tp1_protection_and_close():
+    now = utc_now()
+    signal = touched_signal(now)
+    cache = InMemoryJsonCache()
+    repository = InMemoryLifecycleRepository([signal])
+    market = FakeMarket([])
+    worker = SignalLifecycleWorker(
+        market, repository, cache, clock=lambda: now,
+        outcome_check_seconds=20,
+    )
+
+    first_at = now.timestamp()
+    await cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {
+            "symbol": "BTCUSDT", "price": 103.1,
+            "price_updated_epoch": first_at,
+        }
+    })
+    await cache.set_json(FEED_STATUS_KEY, {
+        "source": "websocket", "connected": True,
+        "last_price_update_epoch": first_at,
+    })
+
+    changed = await worker.track_open_trades_once(now=now)
+    assert changed == 1
+    saved = repository.snapshot_signals()[0]
+    assert saved["outcome"]["state"] == "TP1_HIT"
+    assert saved["outcome"]["protective_stop_price"] == 103.0
+    assert saved["outcome"]["last_live_price_at"] is not None
+    assert repository.list_results() == []
+
+    second_now = now + timedelta(seconds=2)
+    second_at = second_now.timestamp()
+    await cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {
+            "symbol": "BTCUSDT", "price": 102.99,
+            "price_updated_epoch": second_at,
+        }
+    })
+    await cache.set_json(FEED_STATUS_KEY, {
+        "source": "websocket", "connected": True,
+        "last_price_update_epoch": second_at,
+    })
+
+    changed = await worker.track_open_trades_once(now=second_now)
+    assert changed == 1
+    saved = repository.snapshot_signals()[0]
+    assert saved["outcome"]["state"] == "CLOSED"
+    assert saved["outcome"]["result"] == "TP1"
+    assert saved["outcome"]["exit_price"] == 103.0
+    assert saved["outcome"]["exit_via"] == "TP1_PROTECTIVE_STOP_LIVE_PRICE"
+    assert len(repository.list_results()) == 1
+    assert repository.list_results()[0]["r_real"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_stale_or_rest_only_quote_never_moves_protective_stop():
+    now = utc_now()
+    signal = touched_signal(now)
+    cache = InMemoryJsonCache()
+    repository = InMemoryLifecycleRepository([signal])
+    worker = SignalLifecycleWorker(FakeMarket([]), repository, cache, clock=lambda: now)
+    epoch = now.timestamp()
+
+    await cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {"symbol": "BTCUSDT", "price": 103.5, "price_updated_epoch": epoch}
+    })
+    await cache.set_json(FEED_STATUS_KEY, {
+        "source": "rest", "connected": True, "last_price_update_epoch": epoch,
+    })
+    assert await worker.track_open_trades_once(now=now) == 0
+    assert repository.snapshot_signals()[0]["outcome"]["state"] == "OPEN"
+
+
+@pytest.mark.asyncio
+async def test_live_tp2_snapshot_cannot_override_an_older_unprocessed_stop_loss():
+    now = utc_now()
+    signal = touched_signal(now)
+    # This closed candle happened after the last tracked cursor but before the
+    # latest live quote. Its SL must be replayed before the newer TP2 snapshot.
+    candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
+    market = FakeMarket([kline(candle_open, high=102.0, low=97.5, close=101.0)])
+    cache = InMemoryJsonCache()
+    repository = InMemoryLifecycleRepository([signal])
+    worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now)
+    epoch = now.timestamp()
+    await cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {"symbol": "BTCUSDT", "price": 105.5, "price_updated_epoch": epoch}
+    })
+    await cache.set_json(FEED_STATUS_KEY, {
+        "source": "websocket", "connected": True, "last_price_update_epoch": epoch,
+    })
+
+    changed = await worker.track_open_trades_once(now=now)
+
+    assert changed == 1
+    saved = repository.snapshot_signals()[0]
+    assert saved["outcome"]["state"] == "CLOSED"
+    assert saved["outcome"]["result"] == "SL"
+    assert saved["outcome"]["r_real"] == -1.0
+    assert saved["outcome"]["exit_via"] == "SL"
+    assert repository.list_results()[0]["result"] == "SL"
+
+
+@pytest.mark.asyncio
+async def test_live_transition_replays_previous_tp1_before_current_market_snapshot():
+    now = utc_now()
+    signal = touched_signal(now)
+    candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
+    market = FakeMarket([kline(candle_open, high=103.2, low=100.3, close=103.1)])
+    cache = InMemoryJsonCache()
+    repository = InMemoryLifecycleRepository([signal])
+    worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now)
+    epoch = now.timestamp()
+    await cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {"symbol": "BTCUSDT", "price": 103.1, "price_updated_epoch": epoch}
+    })
+    await cache.set_json(FEED_STATUS_KEY, {
+        "source": "websocket", "connected": True, "last_price_update_epoch": epoch,
+    })
+
+    changed = await worker.track_open_trades_once(now=now)
+
+    assert changed == 1
+    saved = repository.snapshot_signals()[0]
+    assert saved["outcome"]["state"] == "TP1_HIT"
+    assert "result" not in saved["outcome"]
+    assert saved["outcome"]["protective_stop_price"] == 103.0
+    assert saved["outcome"]["tracked_until"] is not None
+    assert saved["outcome"]["protection_armed_at"] is not None
