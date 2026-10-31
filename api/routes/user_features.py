@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from api.features_schemas import AlertPreferencesPatch, PriceAlertCreate, PriceAlertPatch, WatchlistAddRequest
-from api.security import Principal, current_principal, require_analytical_access
+from api.security import Principal, require_analytical_access
 from api.services.user_features import AlertPreferencesService, NotificationService, PriceAlertService, WatchlistService
 
 router = APIRouter(tags=["user-features"])
@@ -46,13 +46,13 @@ async def remove_watchlist_symbol(symbol: str, request: Request,
 
 
 @router.get("/account/alert-preferences")
-def get_alert_preferences(request: Request, principal: Principal = Depends(current_principal)) -> dict:
+def get_alert_preferences(request: Request, principal: Principal = Depends(require_analytical_access)) -> dict:
     return _preferences(request).get(principal.user_id)
 
 
 @router.patch("/account/alert-preferences")
 def patch_alert_preferences(body: AlertPreferencesPatch, request: Request,
-                            principal: Principal = Depends(current_principal)) -> dict:
+                            principal: Principal = Depends(require_analytical_access)) -> dict:
     return _preferences(request).patch(principal.user_id, body.model_dump(exclude_unset=True))
 
 
@@ -84,23 +84,23 @@ def delete_price_alert(alert_id: str, request: Request,
 @router.get("/notifications")
 def list_notifications(request: Request, unread_only: bool = Query(default=False),
                        limit: int = Query(default=50, ge=1, le=100), before: datetime | None = Query(default=None),
-                       principal: Principal = Depends(current_principal)) -> dict:
+                       principal: Principal = Depends(require_analytical_access)) -> dict:
     return _notifications(request).list(principal.user_id, unread_only=unread_only, limit=limit, before=before)
 
 
 @router.post("/notifications/{notification_id}/read")
 def mark_notification_read(notification_id: str, request: Request,
-                           principal: Principal = Depends(current_principal)) -> dict:
+                           principal: Principal = Depends(require_analytical_access)) -> dict:
     return _notifications(request).mark_read(principal.user_id, notification_id)
 
 
 @router.post("/notifications/read-all")
-def mark_all_notifications_read(request: Request, principal: Principal = Depends(current_principal)) -> dict:
+def mark_all_notifications_read(request: Request, principal: Principal = Depends(require_analytical_access)) -> dict:
     return _notifications(request).mark_all_read(principal.user_id)
 
 
 @router.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_notification(notification_id: str, request: Request,
-                        principal: Principal = Depends(current_principal)) -> Response:
+                        principal: Principal = Depends(require_analytical_access)) -> Response:
     _notifications(request).delete(principal.user_id, notification_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

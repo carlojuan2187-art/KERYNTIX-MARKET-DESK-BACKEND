@@ -220,9 +220,16 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
         notification = value.get("notification")
         if not isinstance(notification, dict):
             return []
+        # Expired accounts keep the websocket for plan/payment notices so they
+        # can renew, but all feature/market notifications are withheld after
+        # the trial/subscription boundary. Fail closed for unknown notification
+        # kinds rather than accidentally exposing a newly added feature alert.
+        kind = str(notification.get("kind") or "vol").lower()
+        if not can_view_market and kind != "plans":
+            return []
         payload = {
             "id": notification.get("id"),
-            "kind": notification.get("kind", "vol"),
+            "kind": kind,
             "key": notification.get("event_id") or notification.get("id"),
             "text": notification.get("message") or notification.get("title") or "Nueva notificación",
             "symbol": notification.get("symbol"),

@@ -22,7 +22,7 @@ def _payments(request: Request) -> PaymentService:
 def list_billable_plans() -> dict:
     """Public pricing/configuration; this response never claims payment is configured if it isn't."""
     try:
-        price = Decimal(os.getenv("PREMIUM_PRICE_USDT", "40.00"))
+        price = Decimal(os.getenv("PREMIUM_PRICE_USDT", "10.00"))
         valid_price = price.is_finite() and price > 0
     except Exception:
         price, valid_price = Decimal("0"), False

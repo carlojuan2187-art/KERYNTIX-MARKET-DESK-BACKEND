@@ -11,7 +11,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, R
 from pydantic import BaseModel, ConfigDict, Field
 
 from api.business_schemas import PaymentVerifyRequest
-from api.security import Principal, current_principal
+from api.security import Principal, current_principal, require_analytical_access
 from api.services.event_bus import contract_payment_record, publish_payment_updated
 
 router = APIRouter(tags=["contract-compatibility"])
@@ -84,7 +84,7 @@ def contract_payment_history(request: Request, limit: int = Query(default=50, ge
 
 
 @router.get("/referrals")
-def contract_referrals(request: Request, principal: Principal = Depends(current_principal)) -> dict[str, Any]:
+def contract_referrals(request: Request, principal: Principal = Depends(require_analytical_access)) -> dict[str, Any]:
     summary = request.app.state.referral_service.summary(principal.user_id)
     total_premium = int(summary.get("premium_referred", 0))
     rows = summary.get("referrals", [])

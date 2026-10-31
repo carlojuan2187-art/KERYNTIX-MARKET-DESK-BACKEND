@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from api.repositories.signals import RepositoryUnavailable
 from api.security import Principal, require_analytical_access
+from domain.plans import evaluate_access
 from api.services.market_intelligence import AnalyticsIntelligenceUnavailable
 
 router = APIRouter(tags=["market-intelligence"])
@@ -50,8 +51,15 @@ async def get_radar(
         raise HTTPException(status_code=503, detail={"code": "RADAR_UNAVAILABLE", "message": "El radar está recopilando cotizaciones y velas del mercado."}) from exc
     except RepositoryUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "SIGNALS_UNAVAILABLE", "message": "No se pudieron leer los setups activos."}) from exc
-    plan = str(_principal.claims.get("plan") or _principal.claims.get("subscription") or "free").lower()
-    can_see_premium = _principal.is_admin or plan in {"premium", "pro", "admin"}
+    # A live five-day trial has the same feature entitlement as a paid Premium
+    # subscription. Do not infer Premium access from the stored plan label alone:
+    # trial accounts intentionally keep plan="free" until they purchase.
+    entitlement = evaluate_access(
+        _principal.claims,
+        now=datetime.now(timezone.utc),
+        is_admin=_principal.is_admin,
+    )
+    can_see_premium = bool(entitlement.get("allowed"))
     setups = []
     seen = set()
     now = datetime.now(timezone.utc)
