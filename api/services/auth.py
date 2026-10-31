@@ -40,6 +40,7 @@ def refresh_grace_seconds() -> int:
 CHALLENGE_MINUTES = 5
 RESEND_SECONDS = 60
 MAX_CODE_ATTEMPTS = 5
+PASSWORD_HASH_ITERATIONS = 310_000
 
 
 def utcnow() -> datetime:
@@ -94,6 +95,33 @@ def constant_time_code_match(phone: str, supplied: str, expected_hash: str | Non
     except HTTPException:
         return False
     return hmac.compare_digest(actual, expected_hash)
+
+
+def hash_password(password: str) -> str:
+    """Hash a password with PBKDF2-HMAC-SHA256 and a unique random salt."""
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt, PASSWORD_HASH_ITERATIONS
+    )
+    return f"pbkdf2_sha256${PASSWORD_HASH_ITERATIONS}${salt.hex()}${digest.hex()}"
+
+
+def verify_password(password: str, stored_hash: str | None) -> bool:
+    if not stored_hash:
+        return False
+    try:
+        algorithm, iterations_raw, salt_hex, digest_hex = stored_hash.split("$", 3)
+        iterations = int(iterations_raw)
+        if algorithm != "pbkdf2_sha256" or not 100_000 <= iterations <= 1_000_000:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        expected = bytes.fromhex(digest_hex)
+        if len(salt) < 16 or len(expected) != 32:
+            return False
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError):
+        return False
 
 
 def _b64url(data: bytes) -> str:
@@ -191,6 +219,7 @@ def _new_user_id() -> str:
 def _normalize_user_for_response(user: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(user)
     result.pop("_id", None)
+    result.pop("password_hash", None)
     for key in ("created_at", "last_activity", "trial_end", "plan_end", "ban_until", "banned_at"):
         result[key] = iso_utc(as_utc(result.get(key))) if result.get(key) is not None else None
     result["is_admin"] = is_admin_user(user)
@@ -218,6 +247,8 @@ def _user_creation_document(request_doc: Mapping[str, Any], referrer: Mapping[st
         "created_at": now,
         "last_activity": now,
     }
+    if request_doc.get("password_hash"):
+        user["password_hash"] = str(request_doc["password_hash"])
     username = request_doc.get("telegram_username")
     if username:
         user["username"] = "@" + str(username).lstrip("@")
@@ -267,6 +298,48 @@ class AuthService:
         self.repository.create_auth_request(document)
         return {"token": token, "phone": phone, "step": "awaiting_telegram", "expires_at": iso_utc(link_expires), "resend_at": iso_utc(now + timedelta(seconds=RESEND_SECONDS))}
 
+    def start_registration_challenge(self, phone: str, password: str, *, ref_code: str | None = None, requester_ip: str | None = None) -> dict[str, Any]:
+        """Begin a new account registration; only this flow creates password accounts."""
+        if self.repository.get_user_by_phone(phone):
+            raise HTTPException(status_code=409, detail={"code": "ACCOUNT_ALREADY_EXISTS", "message": "Ya existe una cuenta con este teléfono. Inicia sesión o recupera tu contraseña."})
+        now = utcnow()
+        ip_hash = hash_token(requester_ip) if requester_ip else None
+        ip_limit = max(3, min(100, int(os.getenv("PHONE_CHALLENGE_IP_LIMIT", "10"))))
+        if ip_hash and self.repository.count_recent_auth_requests_by_ip(ip_hash, since=now - timedelta(hours=1)) >= ip_limit:
+            raise HTTPException(status_code=429, detail={"code": "TOO_MANY_REQUESTS", "message": "Se alcanzó el límite de registros desde esta conexión. Inténtalo más tarde."})
+        recent = self.repository.find_recent_phone_request(phone, since=now - timedelta(seconds=RESEND_SECONDS))
+        if recent:
+            raise HTTPException(status_code=429, detail={"code": "TOO_MANY_REQUESTS", "message": "Espera 60 segundos antes de solicitar otro código."})
+        username = self.telegram.bot_username()
+        is_configured = getattr(self.telegram, "is_configured", None)
+        if not username or (callable(is_configured) and not is_configured()):
+            raise HTTPException(status_code=503, detail={"code": "TELEGRAM_NOT_CONFIGURED", "message": "El token y el nombre del bot de autenticación de Telegram deben estar configurados."})
+        token = secrets.token_urlsafe(32)
+        link_expires = now + timedelta(minutes=CHALLENGE_MINUTES)
+        referrer = self.repository.get_user_by_ref_code(ref_code) if ref_code else None
+        self.repository.create_auth_request({
+            "token_hash": hash_token(token),
+            "flow": "register",
+            "phone": phone,
+            "password_hash": hash_password(password),
+            "ref_code": ref_code if referrer else None,
+            "created_at": now,
+            "link_expires_at": link_expires,
+            "code_expires_at": None,
+            "resend_at": now + timedelta(seconds=RESEND_SECONDS),
+            "contact_verified": False,
+            "attempts": 0,
+            "contact_attempts": 0,
+            "requester_ip_hash": ip_hash,
+            "consumed": False,
+        })
+        return {"token": token, "phone": phone, "step": "awaiting_telegram", "expires_at": iso_utc(link_expires), "resend_at": iso_utc(now + timedelta(seconds=RESEND_SECONDS))}
+
+    def start_password_recovery_challenge(self, phone: str, *, requester_ip: str | None = None) -> dict[str, Any]:
+        if not self.repository.get_user_by_phone(phone):
+            raise HTTPException(status_code=404, detail={"code": "ACCOUNT_NOT_FOUND", "message": "No encontramos una cuenta con ese teléfono."})
+        return self.start_phone_challenge(phone, requester_ip=requester_ip)
+
     def telegram_check(self, token: str) -> dict[str, Any]:
         request = self.repository.get_auth_request(hash_token(token))
         if request is None:
@@ -277,14 +350,14 @@ class AuthService:
         linked = bool(request.get("contact_verified"))
         if not linked and (link_expiry is None or link_expiry <= now):
             raise HTTPException(status_code=410, detail={"code": "AUTH_REQUEST_EXPIRED", "message": "La solicitud venció. Vuelve a solicitar el código."})
-        if linked and request.get("flow") == "login" and (code_expiry is None or code_expiry <= now or request.get("consumed")):
+        if linked and request.get("flow") in {"login", "register"} and (code_expiry is None or code_expiry <= now or request.get("consumed")):
             raise HTTPException(status_code=410, detail={"code": "AUTH_CODE_EXPIRED", "message": "El código venció. Solicita uno nuevo."})
         return {"linked": linked}
 
     def resend_code(self, token: str) -> dict[str, Any]:
         token_hash = hash_token(token)
         challenge = self.repository.get_auth_request(token_hash)
-        if not challenge or challenge.get("flow") != "login":
+        if not challenge or challenge.get("flow") not in {"login", "register"}:
             raise HTTPException(status_code=404, detail={"code": "AUTH_REQUEST_NOT_FOUND", "message": "La solicitud de acceso no existe."})
         now = utcnow()
         if not challenge.get("contact_verified") or not challenge.get("telegram_chat_id"):
@@ -332,6 +405,8 @@ class AuthService:
             raise HTTPException(status_code=410, detail={"code": "AUTH_CODE_EXPIRED", "message": "El código ya fue utilizado. Solicita uno nuevo."})
 
         existing = self.repository.get_user_by_phone(phone)
+        if challenge.get("flow") == "register" and existing:
+            raise HTTPException(status_code=409, detail={"code": "ACCOUNT_ALREADY_EXISTS", "message": "Ya existe una cuenta con este teléfono. Inicia sesión o recupera tu contraseña."})
         if existing:
             current_chat = str(existing.get("telegram_chat_id") or "")
             challenge_chat = str(challenge["telegram_chat_id"])
@@ -357,6 +432,8 @@ class AuthService:
             user_document = _user_creation_document(challenge, referrer, now)
             try:
                 user, is_new = self.repository.create_user_if_absent(user_document)
+                if challenge.get("flow") == "register" and not is_new:
+                    raise HTTPException(status_code=409, detail={"code": "ACCOUNT_ALREADY_EXISTS", "message": "Ya existe una cuenta con este teléfono. Inicia sesión o recupera tu contraseña."})
                 if str(user.get("telegram_chat_id") or "") != str(challenge["telegram_chat_id"]):
                     user = self.repository.update_user(str(user["user_id"]), {"telegram_chat_id": str(challenge["telegram_chat_id"]), "last_activity": now}) or user
             except ValueError as exc:
@@ -381,6 +458,63 @@ class AuthService:
         self.repository.create_session(session)
         access = issue_access_token(user, session_id, now=now)
         return _normalize_user_for_response(user), access, refresh_token, is_new
+
+    def login_with_password(self, phone: str, password: str, *, request: Request) -> tuple[dict[str, Any], str, str]:
+        now = utcnow()
+        requester_ip = request.client.host if request.client else None
+        ip_hash = hash_token(requester_ip) if requester_ip else None
+        phone_limit = max(3, min(30, int(os.getenv("PASSWORD_LOGIN_PHONE_LIMIT", "10"))))
+        ip_limit = max(5, min(100, int(os.getenv("PASSWORD_LOGIN_IP_LIMIT", "30"))))
+        since_phone = now - timedelta(minutes=15)
+        since_ip = now - timedelta(hours=1)
+        if self.repository.count_recent_password_attempts(phone=phone, since=since_phone) >= phone_limit:
+            raise HTTPException(status_code=429, detail={"code": "TOO_MANY_ATTEMPTS", "message": "Demasiados intentos para este teléfono. Espera 15 minutos e inténtalo de nuevo."})
+        if ip_hash and self.repository.count_recent_password_attempts(ip_hash=ip_hash, since=since_ip) >= ip_limit:
+            raise HTTPException(status_code=429, detail={"code": "TOO_MANY_REQUESTS", "message": "Se alcanzó el límite de inicios de sesión desde esta conexión. Inténtalo más tarde."})
+        self.repository.create_auth_request({
+            "token_hash": hash_token(secrets.token_urlsafe(32)),
+            "flow": "password_login",
+            "phone": phone,
+            "requester_ip_hash": ip_hash,
+            "created_at": now,
+        })
+        user = self.repository.get_user_by_phone(phone)
+        if not user:
+            raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "Teléfono o contraseña incorrectos."})
+        stored_hash = user.get("password_hash")
+        if not stored_hash:
+            raise HTTPException(status_code=409, detail={"code": "PASSWORD_SETUP_REQUIRED", "message": "Esta cuenta es anterior al acceso con contraseña. Configura tu contraseña una sola vez mediante la opción de recuperación."})
+        if not verify_password(password, str(stored_hash)):
+            raise HTTPException(status_code=401, detail={"code": "INVALID_CREDENTIALS", "message": "Teléfono o contraseña incorrectos."})
+
+        user = self.repository.update_user(str(user["user_id"]), {"last_activity": now}) or user
+        user_agent = (request.headers.get("user-agent") or "Unknown device")[:200]
+        session_id = secrets.token_urlsafe(18)
+        refresh_token = secrets.token_urlsafe(48)
+        expires_at = now + timedelta(days=REFRESH_DAYS)
+        self.repository.create_session({
+            "id": session_id,
+            "user_id": str(user["user_id"]),
+            "refresh_hash": hash_token(refresh_token),
+            "created_at": now,
+            "expires_at": expires_at,
+            "last_activity": now,
+            "device": user_agent,
+            "location": "Unknown",
+        })
+        access = issue_access_token(user, session_id, now=now)
+        return _normalize_user_for_response(user), access, refresh_token
+
+    def set_password(self, user_id: str, password: str) -> dict[str, Any]:
+        now = utcnow()
+        user = self.repository.update_user(user_id, {
+            "password_hash": hash_password(password),
+            "password_updated_at": now,
+            "last_activity": now,
+        })
+        if not user:
+            raise HTTPException(status_code=404, detail={"code": "USER_NOT_FOUND", "message": "La cuenta no existe."})
+        return _normalize_user_for_response(user)
 
     def refresh(self, raw_refresh_token: str | None, fallback_token: str | None = None) -> tuple[str, str, datetime]:
         candidates = [t for t in dict.fromkeys([raw_refresh_token, fallback_token]) if t]
