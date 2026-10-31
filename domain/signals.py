@@ -223,14 +223,22 @@ class SignalOutcomeProgress(CanonicalModel):
     result: OutcomeResult | None = None
     tracked_until: AwareDatetime | None = None
     tp1_at: AwareDatetime | None = None
+    tp2_at: AwareDatetime | None = None
+    protection_armed_at: AwareDatetime | None = None
+    last_live_price_at: AwareDatetime | None = None
+    protective_stop_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    exit_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    exit_via: str | None = None
+    calculation_version: str | None = None
+    execution_model: str | None = None
     closed_at: AwareDatetime | None = None
 
-    @field_validator("tracked_until", "tp1_at", "closed_at", mode="before")
+    @field_validator("tracked_until", "tp1_at", "tp2_at", "protection_armed_at", "last_live_price_at", "closed_at", mode="before")
     @classmethod
     def normalize_dates(cls, value: Any) -> Any:
         return _as_utc(value)
 
-    @field_serializer("tracked_until", "tp1_at", "closed_at", when_used="json")
+    @field_serializer("tracked_until", "tp1_at", "tp2_at", "protection_armed_at", "last_live_price_at", "closed_at", when_used="json")
     def serialize_dates(self, value: datetime | None) -> str | None:
         return _utc_iso(value)
 
@@ -325,6 +333,12 @@ class CanonicalSignalResult(CanonicalModel):
     created_at: AwareDatetime | None = None
     touched_at: AwareDatetime | None = None
     tp1_at: AwareDatetime | None = None
+    tp2_at: AwareDatetime | None = None
+    entry_reference: str | None = None
+    exit_price: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    exit_via: str | None = None
+    calculation_version: str | None = None
+    execution_model: str | None = None
     closed_at: AwareDatetime
     evaluated_at: AwareDatetime
     duration_minutes: float | None = Field(default=None, ge=0, allow_inf_nan=False)
@@ -335,12 +349,12 @@ class CanonicalSignalResult(CanonicalModel):
     def normalize_symbol(cls, value: Any) -> Any:
         return value.strip().upper() if isinstance(value, str) else value
 
-    @field_validator("created_at", "touched_at", "tp1_at", "closed_at", "evaluated_at", mode="before")
+    @field_validator("created_at", "touched_at", "tp1_at", "tp2_at", "closed_at", "evaluated_at", mode="before")
     @classmethod
     def normalize_dates(cls, value: Any) -> Any:
         return _as_utc(value)
 
-    @field_serializer("created_at", "touched_at", "tp1_at", "closed_at", "evaluated_at", when_used="json")
+    @field_serializer("created_at", "touched_at", "tp1_at", "tp2_at", "closed_at", "evaluated_at", when_used="json")
     def serialize_dates(self, value: datetime | None) -> str | None:
         return _utc_iso(value)
 
@@ -555,10 +569,10 @@ def lifecycle_geometry_issues(signal: CanonicalSignal | Mapping[str, Any]) -> li
 
 
 def compute_trade_levels(signal: CanonicalSignal | Mapping[str, Any]) -> dict[str, Any] | None:
-    """Mirror app.outcome_logic.trade_levels exactly, for model validation/tests only.
+    """Mirror engine.outcome_logic.trade_levels using canonical strategy entry.
 
-    The tracker uses only the first two positive targets; this function intentionally
-    follows that legacy rule. It does not mean that an exchange order was filled.
+    The entry zone is a trigger window only. R metrics use entry_price, the same
+    modeled price used by the strategy to calculate SL, TP1 and TP2.
     """
     data = _signal_mapping(signal)
     direction = str(data.get("direction") or "").upper()
@@ -573,31 +587,29 @@ def compute_trade_levels(signal: CanonicalSignal | Mapping[str, Any]) -> dict[st
         high = float(zone.get("high", entry))
         if low > high:
             low, high = high, low
-        fill = high if direction == "LONG" else low
-        if fill <= 0:
-            fill = entry
         sl = float(data.get("stop_loss") or 0)
         tps = [float(value) for value in (data.get("take_profits") or []) if float(value) > 0][:2]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    if fill <= 0 or sl <= 0 or not tps:
+    if entry <= 0 or low <= 0 or high <= 0 or not (low <= entry <= high) or sl <= 0 or not tps:
         return None
     if direction == "LONG":
-        valid = sl < fill < tps[0] and (len(tps) == 1 or tps[1] > tps[0])
+        valid = sl < entry < tps[0] and (len(tps) == 1 or tps[1] > tps[0])
     else:
-        valid = sl > fill > tps[0] and (len(tps) == 1 or tps[1] < tps[0])
+        valid = sl > entry > tps[0] and (len(tps) == 1 or tps[1] < tps[0])
     if not valid:
         return None
-    risk = abs(fill - sl)
+    risk = abs(entry - sl)
     return {
         "direction": direction,
-        "fill": fill,
+        "fill": entry,
+        "entry_reference": "entry_price",
         "sl": sl,
         "tp1": tps[0],
         "tp2": tps[1] if len(tps) > 1 else None,
         "risk": risk,
-        "r_tp1": abs(tps[0] - fill) / risk,
-        "r_tp2": (abs(tps[1] - fill) / risk) if len(tps) > 1 else None,
+        "r_tp1": abs(tps[0] - entry) / risk,
+        "r_tp2": (abs(tps[1] - entry) / risk) if len(tps) > 1 else None,
     }
 
 
@@ -632,6 +644,12 @@ def adapt_bot_result(document: Mapping[str, Any]) -> CanonicalSignalResult:
         "created_at": raw.get("created_at"),
         "touched_at": raw.get("touched_at"),
         "tp1_at": raw.get("tp1_at"),
+        "tp2_at": raw.get("tp2_at"),
+        "entry_reference": raw.get("entry_reference"),
+        "exit_price": raw.get("exit_price"),
+        "exit_via": raw.get("exit_via"),
+        "calculation_version": raw.get("calculation_version"),
+        "execution_model": raw.get("execution_model"),
         "closed_at": raw.get("closed_at") or now_fallback,
         "evaluated_at": raw.get("evaluated_at") or now_fallback,
         "duration_minutes": raw.get("duration_minutes"),
