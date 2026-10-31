@@ -177,7 +177,21 @@ class RedisJsonCache:
             from redis.asyncio import Redis
         except ImportError as exc:  # pragma: no cover - depends on deployment dependencies
             raise RuntimeError("Instala redis con: pip install 'redis>=5,<7'") from exc
-        return cls(Redis.from_url(url, decode_responses=True, socket_connect_timeout=3, socket_timeout=3, health_check_interval=30))
+        try:
+            max_connections = int(os.getenv("REDIS_MAX_CONNECTIONS", "32"))
+        except (TypeError, ValueError):
+            max_connections = 32
+        max_connections = max(4, min(128, max_connections))
+        return cls(Redis.from_url(
+            url,
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+            health_check_interval=30,
+            max_connections=max_connections,
+            retry_on_timeout=True,
+            socket_keepalive=True,
+        ))
 
     async def get_json(self, key: str) -> Any | None:
         raw = await self._client.get(key)
