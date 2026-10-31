@@ -146,7 +146,7 @@ class MarketAnalyticsService:
                 ("open_interest", self._safe_endpoint("/fapi/v1/openInterest", {"symbol": symbol})),
                 ("oi_history", self._safe_endpoint("/futures/data/openInterestHist", {"symbol": symbol, "period": "1h", "limit": 26})),
                 ("long_short", self._safe_endpoint("/futures/data/globalLongShortAccountRatio", {"symbol": symbol, "period": "1h", "limit": 26})),
-                ("funding_history", self._safe_endpoint("/futures/data/fundingRate", {"symbol": symbol, "limit": 25})),
+                ("funding_history", self._safe_endpoint("/fapi/v1/fundingRate", {"symbol": symbol, "limit": 25})), 
                 ("basis_history", self._safe_endpoint("/futures/data/basis", {"pair": symbol, "contractType": "PERPETUAL", "period": "1h", "limit": 25})),
                 ("taker_history", self._safe_endpoint("/futures/data/takerlongshortRatio", {"symbol": symbol, "period": "15m", "limit": 16})),
                 ("ticker_24h", self._safe_endpoint("/fapi/v1/ticker/24hr", {"symbol": symbol})),
