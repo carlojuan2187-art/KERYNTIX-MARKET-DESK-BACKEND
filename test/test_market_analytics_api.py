@@ -156,6 +156,10 @@ def test_derivatives_api_preserves_partial_metrics_and_caches_response():
     assert not any("topLongShort" in call[1] for call in rest.calls if call[0] == "endpoint")
     assert len(data["oi_history"]) == 26
     assert len(data["funding_history"]) == 25
+    funding_history_calls = [call for call in rest.calls if call[0] == "endpoint" and call[1] == "/fapi/v1/fundingRate"]
+    assert len(funding_history_calls) == 1
+    assert funding_history_calls[0][2] == {"symbol": "BTCUSDT", "limit": 25}
+    assert not any(call[0] == "endpoint" and call[1] == "/futures/data/fundingRate" for call in rest.calls)
     assert len(data["basis_history"]) == 25
     assert data["basis_rate_pct"] == pytest.approx(0.04)
     assert data["annualized_basis_pct"] == pytest.approx(12.0)
