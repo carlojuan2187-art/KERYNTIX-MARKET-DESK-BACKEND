@@ -21,9 +21,10 @@ class FakeAnalyticsRest:
     def __init__(self):
         self.calls = []
         self.closed = False
-        self.api_key_configured = True
         self.fail_all_analytics = False
         self.short_oi_history = False
+        self.missing_basis_annualized = False
+        self.short_funding_history = False
         self.failed_paths = set()
         self.tickers = [
             {"symbol": f"COIN{i}USDT", "quoteVolume": str(100_000_000 - i * 1_000_000)}
@@ -92,24 +93,23 @@ class FakeAnalyticsRest:
                              "timestamp": now_ms - (25 - i) * 3_600_000})
             return rows
         if path.endswith("fundingRate"):
-            return [{"symbol": symbol, "fundingRate": "0.0001", "fundingTime": now_ms - (24 - i) * 8 * 3_600_000,
-                     "markPrice": "101.2"} for i in range(25)]
+            funding_rows = [{"symbol": symbol, "fundingRate": "0.0001", "fundingTime": now_ms - (24 - i) * 8 * 3_600_000,
+                             "markPrice": "101.2"} for i in range(25)]
+            return funding_rows[-1:] if self.short_funding_history else funding_rows
         if path.endswith("/basis"):
-            return [{"pair": symbol, "contractType": "PERPETUAL", "basisRate": "0.0004",
+            rows = [{"pair": symbol, "contractType": "PERPETUAL", "basisRate": "0.0004",
                      "annualizedBasisRate": "0.12", "basis": "0.04", "futuresPrice": "101.04",
                      "indexPrice": "101.0", "timestamp": now_ms - (24 - i) * 3_600_000}
                     for i in range(25)]
+            if self.missing_basis_annualized:
+                for row in rows:
+                    row.pop("annualizedBasisRate", None)
+            return rows
         if path.endswith("takerlongshortRatio"):
             return [{"buySellRatio": "1.2", "buyVol": "120", "sellVol": "100",
                      "timestamp": now_ms - (15 - i) * 15 * 60_000} for i in range(16)]
         if path.endswith("ticker/24hr"):
             return {"symbol": symbol, "priceChangePercent": "2.5", "closeTime": now_ms}
-        if path.endswith("topLongShortAccountRatio"):
-            return [{"longShortRatio": "1.20", "longAccount": "0.55", "shortAccount": "0.45",
-                     "timestamp": now_ms - 3_600_000} for _ in range(25)]
-        if path.endswith("topLongShortPositionRatio"):
-            return [{"longShortRatio": "1.10", "longAccount": "0.53", "shortAccount": "0.47",
-                     "timestamp": now_ms - 3_600_000} for _ in range(25)]
         if path.endswith("/depth"):
             bids = [[str(100 - i), str(2 + i)] for i in range(20)]
             asks = [[str(101 + i), str(1 + i)] for i in range(20)]
@@ -151,8 +151,9 @@ def test_derivatives_api_preserves_partial_metrics_and_caches_response():
     assert data["long_short_ratio"]["percent_long"] == pytest.approx(58)
     assert data["long_short_ratio"]["ratio_24h_ago"] == pytest.approx(1.2)
     assert data["long_short_ratio"]["percent_long_24h_ago"] == pytest.approx(64)
-    assert data["top_trader_accounts"]["long"] == pytest.approx(55)
-    assert data["top_trader_positions"]["long"] == pytest.approx(53)
+    assert data["top_trader_accounts"]["long"] is None
+    assert data["top_trader_positions"]["long"] is None
+    assert not any("topLongShort" in call[1] for call in rest.calls if call[0] == "endpoint")
     assert len(data["oi_history"]) == 26
     assert len(data["funding_history"]) == 25
     assert len(data["basis_history"]) == 25
@@ -168,7 +169,7 @@ def test_derivatives_api_preserves_partial_metrics_and_caches_response():
 
 def test_derivatives_api_does_not_fabricate_failed_metrics():
     rest = FakeAnalyticsRest()
-    rest.failed_paths = {"/fapi/v1/openInterest", "/futures/data/openInterestHist", "/futures/data/globalLongShortAccountRatio", "/futures/data/basis", "/futures/data/topLongShortPositionRatio", "/futures/data/topLongShortAccountRatio"}
+    rest.failed_paths = {"/fapi/v1/openInterest", "/futures/data/openInterestHist", "/futures/data/globalLongShortAccountRatio", "/futures/data/basis"}
     app, _, _ = get_test_app(rest)
     with TestClient(app) as client:
         response = client.get("/derivatives?symbol=ETHUSDT")
@@ -182,7 +183,7 @@ def test_derivatives_api_does_not_fabricate_failed_metrics():
     assert data["oi_change_24h"] is None
     assert data["long_short_ratio"]["percent_long"] is None
     assert data["top_trader_ratio"]["long"] is None
-    assert data["sources"]["top_trader_accounts"]["status"] == "unavailable"
+    assert "top_trader_accounts" not in data["sources"]
 
 
 def test_derivatives_does_not_label_short_oi_history_as_24h_change():
@@ -198,9 +199,8 @@ def test_derivatives_does_not_label_short_oi_history_as_24h_change():
     assert data["sources"]["open_interest_history"]["status"] == "partial"
 
 
-def test_derivatives_marks_top_traders_as_config_missing_without_key():
+def test_derivatives_never_requests_top_trader_endpoints_or_requires_private_key():
     rest = FakeAnalyticsRest()
-    rest.api_key_configured = False
     app, _, _ = get_test_app(rest)
     with TestClient(app) as client:
         response = client.get("/derivatives?symbol=BTCUSDT")
@@ -208,9 +208,39 @@ def test_derivatives_marks_top_traders_as_config_missing_without_key():
     data = response.json()
     assert data["top_trader_accounts"]["long"] is None
     assert data["top_trader_positions"]["long"] is None
-    assert data["sources"]["top_trader_accounts"]["status"] == "api_key_missing"
-    assert data["sources"]["top_trader_positions"]["status"] == "api_key_missing"
+    assert "top_trader_accounts" not in data["sources"]
+    assert "top_trader_positions" not in data["sources"]
     assert not any("topLongShort" in call[1] for call in rest.calls if call[0] == "endpoint")
+
+
+def test_derivatives_plots_reported_basis_even_when_annualized_rate_is_missing():
+    rest = FakeAnalyticsRest()
+    rest.missing_basis_annualized = True
+    app, _, _ = get_test_app(rest)
+    with TestClient(app) as client:
+        response = client.get("/derivatives?symbol=BTCUSDT")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["basis_rate_pct"] == pytest.approx(0.04)
+    assert data["annualized_basis_pct"] is None
+    valid_period_points = [point for point in data["basis_history"] if point["basis_rate_pct"] is not None]
+    assert len(valid_period_points) == 25
+    assert data["sources"]["basis"]["points"] == 25
+    assert data["basis_coverage_hours"] == pytest.approx(24.0)
+
+
+def test_derivatives_reports_one_funding_point_without_claiming_zero_history():
+    rest = FakeAnalyticsRest()
+    rest.short_funding_history = True
+    app, _, _ = get_test_app(rest)
+    with TestClient(app) as client:
+        response = client.get("/derivatives?symbol=BTCUSDT")
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["funding_history"]) == 1
+    assert data["funding_history"][0]["funding_rate_pct"] == pytest.approx(0.01)
+    assert data["sources"]["funding_history"]["points"] == 1
+    assert data["funding_history_coverage_hours"] == 0
 
 
 def test_derivatives_rejects_bad_symbol():

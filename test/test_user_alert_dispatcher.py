@@ -179,3 +179,62 @@ def test_web_push_only_preference_queues_durable_delivery_from_price_alert():
     assert row["in_app"] is False
     assert row["web_push_delivery"]["status"] == "pending"
     assert "telegram_delivery" not in row
+
+
+
+def test_new_signal_creates_durable_notifications_only_for_eligible_opted_in_users():
+    auth = InMemoryAuthRepository()
+    make_user(auth, "premium-signals", prefs={
+        "on": True, "signals": True, "in_app": True, "telegram": True, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }, chat_id="telegram-premium")
+    make_user(auth, "muted-signals", prefs={
+        "on": True, "signals": False, "in_app": True, "telegram": True, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }, chat_id="telegram-muted")
+    make_user(auth, "expired-signals", active=False, prefs={
+        "on": True, "signals": True, "in_app": True, "telegram": True, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }, chat_id="telegram-expired")
+    features = InMemoryUserFeatureRepository()
+    cache = InMemoryJsonCache()
+    processor = UserAlertProcessor(auth, features, cache, NoTelegram())
+    signal = {
+        "id": "signal-abc", "symbol": "BTCUSDT", "direction": "LONG", "visibility": "premium",
+        "entry_price": 65000.0, "stop_loss": 64200.0, "take_profits": [66500.0, 67200.0],
+        "score": 88.5,
+    }
+
+    first = asyncio.run(processor.notify_new_signal(signal))
+    replay = asyncio.run(processor.notify_new_signal(signal))
+
+    assert first["users_scanned"] == 3
+    assert first["notifications_created"] == 1
+    assert first["telegram_queued"] == 1
+    assert replay["notifications_created"] == 0
+    notifications = features.list_notifications("premium-signals")
+    assert len(notifications) == 1
+    assert notifications[0]["kind"] == "signals"
+    assert notifications[0]["event_id"] == "signal-created:signal-abc"
+    assert notifications[0]["telegram_delivery"]["status"] == "pending"
+    assert "BTCUSDT" in notifications[0]["message"]
+    assert features.list_notifications("muted-signals") == []
+    assert features.list_notifications("expired-signals") == []
+    assert any(channel == "notifications:events:v1" for channel, _event in cache.published)
+
+
+def test_public_signal_notification_can_reach_an_active_non_premium_user():
+    auth = InMemoryAuthRepository()
+    now = datetime.now(UTC)
+    auth.create_user_if_absent({
+        "user_id": "trial-public", "phone": "+17875550001", "plan": "free", "plan_end": None,
+        "trial_end": now + timedelta(days=2), "banned": False, "ref_code": "trial-public",
+        "alert_prefs": {"on": True, "signals": True, "in_app": True, "telegram": False, "web_push": False},
+    })
+    features = InMemoryUserFeatureRepository()
+    processor = UserAlertProcessor(auth, features, InMemoryJsonCache(), NoTelegram())
+    outcome = asyncio.run(processor.notify_new_signal({
+        "id": "public-signal", "symbol": "ETHUSDT", "direction": "SHORT", "visibility": "public",
+    }, now=now))
+    assert outcome["notifications_created"] == 1
+    assert len(features.list_notifications("trial-public")) == 1
