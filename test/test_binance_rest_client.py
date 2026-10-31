@@ -46,3 +46,29 @@ def test_public_analytics_client_allows_usdm_funding_history_endpoint():
         assert requested[0].url.params["limit"] == "25"
 
     asyncio.run(scenario())
+
+
+def test_binance_rate_limit_retry_honors_retry_after_header():
+    async def scenario():
+        requests = 0
+        delays = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal requests
+            requests += 1
+            if requests == 1:
+                return httpx.Response(429, headers={"Retry-After": "2"}, json={"code": -1003})
+            return httpx.Response(200, json=[])
+
+        async def fake_sleep(delay: float):
+            delays.append(delay)
+
+        transport = httpx.MockTransport(handler)
+        async with httpx.AsyncClient(base_url="https://fapi.binance.com", transport=transport) as http:
+            client = BinanceRestClient(client=http, retries=2, sleep=fake_sleep)
+            result = await client.fetch_24h_tickers()
+        assert result == []
+        assert requests == 2
+        assert delays == [2.0]
+
+    asyncio.run(scenario())

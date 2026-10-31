@@ -290,3 +290,111 @@ def test_new_signal_notifications_follow_each_users_language_preference():
     assert spanish["title"] == "Nueva señal LONG · BTCUSDT"
     assert "FTrade publicó una nueva señal" in spanish["message"]
     assert "Nueva señal LONG" in spanish["telegram_delivery"]["text"]
+
+
+def test_signal_notifications_paginate_beyond_first_500_users_without_task_fanout():
+    auth = InMemoryAuthRepository()
+    prefs = {
+        "on": True, "signals": True, "in_app": True, "telegram": False, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }
+    for index in range(123):
+        make_user(auth, f"scale-user-{index:04d}", prefs=prefs)
+    features = InMemoryUserFeatureRepository()
+    processor = UserAlertProcessor(
+        auth, features, InMemoryJsonCache(), NoTelegram(), page_size=50, notify_concurrency=7,
+    )
+
+    outcome = asyncio.run(processor.notify_new_signal({
+        "id": "scale-signal", "symbol": "BTCUSDT", "direction": "LONG", "visibility": "premium",
+        "entry_price": 65000, "stop_loss": 64000, "take_profits": [67000],
+    }))
+
+    assert outcome["users_scanned"] == 123
+    assert outcome["notifications_created"] == 123
+    assert sum(len(features.list_notifications(f"scale-user-{index:04d}")) for index in range(123)) == 123
+
+
+def test_market_alert_dispatch_paginates_users_past_old_5000_cutoff():
+    auth = InMemoryAuthRepository()
+    for index in range(117):
+        user_id = f"market-scale-user-{index:04d}"
+        auth.create_user_if_absent({
+            "user_id": user_id, "phone": f"+1787556{index:05d}", "telegram_chat_id": None,
+            "plan": "premium", "plan_end": datetime.now(UTC) + timedelta(days=10),
+            "trial_end": None, "banned": False, "ref_code": f"market-scale-ref-{index:04d}",
+            "alert_prefs": {"on": True, "liq": True, "mov": True, "vol": True,
+                            "price": True, "in_app": True, "telegram": False},
+            "language": "en",
+        })
+    features = InMemoryUserFeatureRepository()
+    cache = InMemoryJsonCache()
+    now = datetime.now(UTC).timestamp()
+    asyncio.run(cache.set_json("market:liquidations:summary:v1:5", {
+        "status": "ok", "coverage_complete": True, "total": 15_000_000,
+        "long_share": 0.82, "top": [{"symbol": "ETHUSDT", "usd": 6_000_000, "long": 5_500_000, "short": 500_000}],
+        "updated_epoch": now,
+    }))
+    processor = UserAlertProcessor(
+        auth, features, cache, NoTelegram(), clock=lambda: now, page_size=50, notify_concurrency=8,
+    )
+
+    status = asyncio.run(processor.run_once())
+
+    assert status["users_scanned"] == 117
+    assert status["notifications_created"] == 117
+
+
+def test_price_alert_dispatch_uses_cursor_pages():
+    auth = InMemoryAuthRepository()
+    features = InMemoryUserFeatureRepository()
+    cache = InMemoryJsonCache()
+    now = datetime.now(UTC)
+    alerts_count = 113
+    for index in range(alerts_count):
+        user_id = f"price-scale-user-{index:04d}"
+        make_user(auth, user_id)
+        features.create_price_alert({
+            "id": f"price-alert-{index:04d}", "user_id": user_id, "symbol": "BTCUSDT",
+            "condition": "above", "target_price": 100.0, "enabled": True, "repeat": False,
+            "cooldown_seconds": 300, "created_at": now, "updated_at": now, "trigger_count": 0,
+        })
+    asyncio.run(cache.set_json(QUOTES_KEY, {"BTCUSDT": {"symbol": "BTCUSDT", "price": 105.0}}))
+    processor = UserAlertProcessor(auth, features, cache, NoTelegram(), clock=lambda: now.timestamp(),
+                                    page_size=50, notify_concurrency=8)
+
+    status = asyncio.run(processor.run_once())
+
+    assert status["price_alerts_triggered"] == alerts_count
+    assert status["notifications_created"] == alerts_count
+
+
+def test_signal_notification_dispatch_reaches_users_beyond_legacy_5000_limit():
+    auth = InMemoryAuthRepository()
+    prefs = {
+        "on": True, "signals": True, "in_app": True, "telegram": False, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }
+    total = 5007
+    now = datetime.now(UTC)
+    for index in range(total):
+        user_id = f"scale-5000-user-{index:05d}"
+        auth.create_user_if_absent({
+            "user_id": user_id, "phone": f"+1787557{index:06d}", "telegram_chat_id": None,
+            "plan": "premium", "plan_end": now + timedelta(days=10), "trial_end": None,
+            "banned": False, "ref_code": f"scale-5000-ref-{index:05d}",
+            "alert_prefs": prefs, "language": "en",
+        })
+    features = InMemoryUserFeatureRepository()
+    processor = UserAlertProcessor(
+        auth, features, InMemoryJsonCache(), NoTelegram(), page_size=500, notify_concurrency=16,
+    )
+
+    outcome = asyncio.run(processor.notify_new_signal({
+        "id": "scale-5000-signal", "symbol": "ETHUSDT", "direction": "SHORT", "visibility": "premium",
+        "entry_price": 3000, "stop_loss": 3100, "take_profits": [2900],
+    }))
+
+    assert outcome["users_scanned"] == total
+    assert outcome["notifications_created"] == total
+    assert len(features._notifications) == total

@@ -110,3 +110,59 @@ async def test_repeat_outcome_processing_is_idempotent_after_close():
     assert await worker.track_open_trades_once(now=now, force=True) == 1
     assert await worker.track_open_trades_once(now=now + timedelta(minutes=1), force=True) == 0
     assert len(repository.list_results()) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_trades_reuse_one_candle_fetch_per_symbol():
+    now = utc_now()
+    base = touched_signal(now)
+    signals = []
+    for index in range(3):
+        row = dict(base)
+        row["_id"] = f"mongo-open-{index}"
+        row["id"] = f"open-uuid-{index}"
+        row["outcome"] = dict(base["outcome"])
+        signals.append(row)
+    candle_open = base["outcome"]["tracked_until"] + timedelta(minutes=1)
+    market = FakeMarket([kline(candle_open, high=105.5, low=102.0, close=105.2)])
+    cache = InMemoryJsonCache()
+    repository = InMemoryLifecycleRepository(signals)
+    worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now, outcome_check_seconds=5)
+
+    changed = await worker.track_open_trades_once(now=now, force=True)
+
+    assert changed == 3
+    assert len(market.klines_calls) == 1
+    assert market.klines_calls[0][0] == "BTCUSDT"
+    assert all(row["outcome"]["state"] == "CLOSED" for row in repository.snapshot_signals())
+    assert len(repository.list_results()) == 3
+
+
+@pytest.mark.asyncio
+async def test_shared_lifecycle_history_chunks_old_ranges_so_recent_signals_are_not_starved(monkeypatch):
+    import worker.signal_lifecycle as lifecycle_module
+
+    now = utc_now()
+    old = touched_signal(now)
+    old["_id"] = "mongo-old"
+    old["id"] = "open-old"
+    old["outcome"] = {"state": "OPEN", "tracked_until": now - timedelta(days=2), "tp1_at": None, "recipient_ids": []}
+    recent = touched_signal(now)
+    recent["_id"] = "mongo-recent"
+    recent["id"] = "open-recent"
+    recent["outcome"] = {"state": "OPEN", "tracked_until": now - timedelta(minutes=4), "tp1_at": None, "recipient_ids": []}
+
+    repository = InMemoryLifecycleRepository([old, recent])
+    worker = SignalLifecycleWorker(FakeMarket(), repository, InMemoryJsonCache(), clock=lambda: now)
+    monkeypatch.setattr(lifecycle_module, "OUTCOME_MAX_PAGES", 1)
+    ranges = []
+
+    async def fetch_range(symbol, start_at, end_at):
+        ranges.append((symbol, start_at, end_at))
+        return []
+
+    monkeypatch.setattr(worker, "_fetch_candles_since", fetch_range)
+    assert await worker.track_open_trades_once(now=now, force=True) == 0
+    assert len(ranges) > 1
+    assert ranges[-1][2] == now.replace(tzinfo=None)
+    assert ranges[-1][1] <= now.replace(tzinfo=None) - timedelta(minutes=4)

@@ -200,3 +200,31 @@ def test_real_vendored_strategy_never_generates_from_insufficient_history():
     result = mtf_strategies_by_plan(small, small, small, reference_market_price=100.0, debug_counts=diagnostics)
     assert result == {}
     assert any("insufficient_history" in reason for reason in diagnostics)
+
+
+@pytest.mark.asyncio
+async def test_scan_uses_a_fixed_worker_pool_for_large_symbol_lists(monkeypatch):
+    now = datetime.now(timezone.utc)
+    symbols = [f"COIN{index:03d}USDT" for index in range(75)]
+
+    class ManySymbolsMarket(FakeMarketClient):
+        async def fetch_24h_tickers(self):
+            return [{"symbol": symbol, "quoteVolume": "90000000"} for symbol in symbols]
+
+    analyzed = 0
+    def no_signal_strategy(*args, **kwargs):
+        nonlocal analyzed
+        analyzed += 1
+        return {}
+
+    monkeypatch.setattr(signal_scanner, "mtf_strategies_by_plan", no_signal_strategy)
+    scanner = SignalScanner(
+        ManySymbolsMarket(now), InMemorySignalRepository(), InMemorySweepStore(),
+        min_quote_volume=1, concurrency=3, request_delay_seconds=0.0, clock=lambda: now,
+    )
+
+    result = await scanner.scan_once()
+
+    assert result["symbols_seen"] == len(symbols)
+    assert result["analysis_workers"] == 3
+    assert analyzed == len(symbols)
