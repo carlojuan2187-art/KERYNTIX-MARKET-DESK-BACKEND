@@ -148,7 +148,7 @@ class BscRpcVerifier:
 
 
 class PaymentService:
-    PRICE_USDT = Decimal("40.00")
+    PRICE_USDT = Decimal("10.00")
     PLAN_DAYS = 30
 
     def __init__(self, repository: Any, plan_service: PlanService, chain_verifier: ChainVerifier | None = None,
@@ -159,7 +159,7 @@ class PaymentService:
         self.chain = chain_verifier or BscRpcVerifier()
         self.referral_service = referral_service
         self.business_notifications = business_notifications
-        raw_price = price_usdt if price_usdt is not None else Decimal(os.getenv("PREMIUM_PRICE_USDT", "40.00"))
+        raw_price = price_usdt if price_usdt is not None else Decimal(os.getenv("PREMIUM_PRICE_USDT", "10.00"))
         if not raw_price.is_finite() or raw_price <= 0:
             raise ValueError("PREMIUM_PRICE_USDT debe ser un decimal positivo")
         if raw_price.quantize(Decimal("0.001")) != raw_price:

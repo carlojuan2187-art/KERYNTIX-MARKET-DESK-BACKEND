@@ -221,6 +221,20 @@ def _normalize_user_for_response(user: Mapping[str, Any]) -> dict[str, Any]:
     result.pop("_id", None)
     result.pop("password_hash", None)
     result["language"] = "es" if result.get("language") == "es" else "en"
+    # Normalize legacy accounts as well as new accounts so the UI, realtime
+    # handlers, and notification worker all see the same default preferences.
+    defaults = {
+        "on": True, "liq": True, "mov": True, "vol": True, "signals": True,
+        "price": True, "plans": True, "in_app": True, "telegram": True,
+        "web_push": False,
+    }
+    stored_prefs = result.get("alert_prefs")
+    normalized_prefs = dict(defaults)
+    if isinstance(stored_prefs, Mapping):
+        for key in defaults:
+            if key in stored_prefs:
+                normalized_prefs[key] = bool(stored_prefs[key])
+    result["alert_prefs"] = normalized_prefs
     for key in ("created_at", "last_activity", "trial_end", "plan_end", "ban_until", "banned_at"):
         result[key] = iso_utc(as_utc(result.get(key))) if result.get(key) is not None else None
     result["is_admin"] = is_admin_user(user)
@@ -243,7 +257,11 @@ def _user_creation_document(request_doc: Mapping[str, Any], referrer: Mapping[st
         "ref_premium_valid": False,
         "risk_profile": {"capital": 1000.0, "risk_pct": 1.0},
         "watchlist": [],
-        "alert_prefs": {"on": True, "liq": True, "mov": True, "vol": True},
+        "alert_prefs": {
+            "on": True, "liq": True, "mov": True, "vol": True,
+            "signals": True, "price": True, "plans": True,
+            "in_app": True, "telegram": True, "web_push": False,
+        },
         "tz": "America/Havana",
         "banned": False,
         "created_at": now,
@@ -339,9 +357,20 @@ class AuthService:
         return {"token": token, "phone": phone, "step": "awaiting_telegram", "expires_at": iso_utc(link_expires), "resend_at": iso_utc(now + timedelta(seconds=RESEND_SECONDS))}
 
     def start_password_recovery_challenge(self, phone: str, *, requester_ip: str | None = None) -> dict[str, Any]:
+        # Return the same public response and run the same IP/phone throttles
+        # regardless of whether the account exists. The existence check is only
+        # used after Telegram ownership is proven, to prevent accidental signup.
+        challenge = self.start_phone_challenge(phone, requester_ip=requester_ip)
         if not self.repository.get_user_by_phone(phone):
-            raise HTTPException(status_code=404, detail={"code": "ACCOUNT_NOT_FOUND", "message": "No encontramos una cuenta con ese teléfono."})
-        return self.start_phone_challenge(phone, requester_ip=requester_ip)
+            marked = self.repository.update_auth_request(
+                hash_token(challenge["token"]), {"recovery_noop": True}
+            )
+            if not marked:
+                raise HTTPException(status_code=503, detail={
+                    "code": "RECOVERY_UNAVAILABLE",
+                    "message": "No se pudo completar la solicitud. Inténtalo de nuevo más tarde.",
+                })
+        return challenge
 
     def telegram_check(self, token: str) -> dict[str, Any]:
         request = self.repository.get_auth_request(hash_token(token))
@@ -408,6 +437,13 @@ class AuthService:
             raise HTTPException(status_code=410, detail={"code": "AUTH_CODE_EXPIRED", "message": "El código ya fue utilizado. Solicita uno nuevo."})
 
         existing = self.repository.get_user_by_phone(phone)
+        if challenge.get("recovery_noop") and existing is None:
+            # Do not let an unknown number become a new account by completing a
+            # recovery flow. The browser shows the same neutral confirmation.
+            raise HTTPException(status_code=409, detail={
+                "code": "RECOVERY_ACCEPTED",
+                "message": "Si existe una cuenta con ese teléfono, se han enviado instrucciones para recuperar el acceso.",
+            })
         if challenge.get("flow") == "register" and existing:
             raise HTTPException(status_code=409, detail={"code": "ACCOUNT_ALREADY_EXISTS", "message": "Ya existe una cuenta con este teléfono. Inicia sesión o recupera tu contraseña."})
         if existing:
