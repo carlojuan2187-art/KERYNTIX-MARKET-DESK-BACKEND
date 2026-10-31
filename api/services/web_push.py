@@ -203,6 +203,15 @@ class WebPushService:
         if not self.features.delete_push_subscription(str(subscription_id), str(user_id)):
             raise HTTPException(status_code=404, detail={"code": "PUSH_SUBSCRIPTION_NOT_FOUND", "message": "La suscripción no existe."})
 
+    def delete_current(self, user_id: str, endpoint: str) -> bool:
+        """Remove only the exact browser endpoint supplied by the authenticated user."""
+        safe_endpoint = validate_push_endpoint(endpoint)
+        rows = self.features.list_push_subscriptions(str(user_id), limit=self.MAX_SUBSCRIPTIONS)
+        for row in rows:
+            if str(row.get("endpoint") or "") == safe_endpoint:
+                return bool(self.features.delete_push_subscription(str(row.get("id") or ""), str(user_id)))
+        return False
+
 
 def web_push_configuration_issues(gateway: Any) -> list[str]:
     if getattr(gateway, "is_configured", lambda: False)():
