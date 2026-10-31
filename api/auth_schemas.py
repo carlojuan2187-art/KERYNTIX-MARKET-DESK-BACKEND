@@ -25,6 +25,27 @@ class PhoneChallengeRequest(StrictModel):
         return normalized
 
 
+class RegisterRequest(PhoneChallengeRequest):
+    password: str = Field(min_length=10, max_length=128)
+
+
+class PasswordLoginRequest(StrictModel):
+    phone: str
+    password: str = Field(min_length=1, max_length=128)
+
+    @field_validator("phone")
+    @classmethod
+    def valid_e164(cls, value: str) -> str:
+        normalized = re.sub(r"\s+", "", value)
+        if not re.fullmatch(r"\+[1-9][0-9]{7,14}", normalized):
+            raise ValueError("phone debe estar en formato E.164")
+        return normalized
+
+
+class SetPasswordRequest(StrictModel):
+    password: str = Field(min_length=10, max_length=128)
+
+
 class PhoneChallengeResponse(BaseModel):
     token: str
     phone: str
