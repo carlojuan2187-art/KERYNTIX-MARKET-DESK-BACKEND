@@ -141,7 +141,6 @@ class MarketAnalyticsService:
                 return cached
 
             now = self.clock()
-            key_configured = bool(getattr(self.rest, "api_key_configured", False))
             requests: list[tuple[str, Any]] = [
                 ("funding", self._safe_endpoint("/fapi/v1/premiumIndex", {"symbol": symbol})),
                 ("open_interest", self._safe_endpoint("/fapi/v1/openInterest", {"symbol": symbol})),
@@ -152,11 +151,6 @@ class MarketAnalyticsService:
                 ("taker_history", self._safe_endpoint("/futures/data/takerlongshortRatio", {"symbol": symbol, "period": "15m", "limit": 16})),
                 ("ticker_24h", self._safe_endpoint("/fapi/v1/ticker/24hr", {"symbol": symbol})),
             ]
-            if key_configured:
-                requests.extend([
-                    ("top_accounts", self._safe_endpoint("/futures/data/topLongShortAccountRatio", {"symbol": symbol, "period": "1h", "limit": 25})),
-                    ("top_positions", self._safe_endpoint("/futures/data/topLongShortPositionRatio", {"symbol": symbol, "period": "1h", "limit": 25})),
-                ])
             results = await asyncio.gather(*(request for _, request in requests))
             data = {name: value for (name, _), value in zip(requests, results)}
 
@@ -168,7 +162,13 @@ class MarketAnalyticsService:
                 return [dict(row) for row in raw_rows if isinstance(row, dict)] if isinstance(raw_rows, list) else []
 
             def timestamp(row: dict[str, Any]) -> float | None:
-                return number(row.get("timestamp", row.get("fundingTime", row.get("time"))))
+                # Binance endpoints use different timestamp field names. Prefer the
+                # first populated value instead of stopping at an explicit null.
+                for field in ("timestamp", "fundingTime", "time"):
+                    stamp = number(row.get(field))
+                    if stamp is not None:
+                        return stamp
+                return None
 
             def history_coverage(raw_rows: list[dict[str, Any]]) -> float | None:
                 stamps = [stamp for row in raw_rows if (stamp := timestamp(row)) is not None]
@@ -260,68 +260,51 @@ class MarketAnalyticsService:
                 sp = sp * 100 if sp is not None else (100 - lp if lp is not None else None)
                 ls_history.append({"timestamp": int(stamp), "time": _iso_from_ms(stamp), "ratio": ratio, "percent_long": lp, "percent_short": sp})
 
-            def ratio_payload(name: str) -> dict[str, Any]:
-                top_rows = sorted(rows(name), key=lambda row: timestamp(row) if timestamp(row) is not None else -1)
-                latest = top_rows[-1] if top_rows else {}
-                ratio = number(latest.get("longShortRatio"))
-                lp = number(latest.get("longAccount"))
-                sp = number(latest.get("shortAccount"))
-                derived = False
-                if lp is None and ratio is not None and ratio >= 0:
-                    lp, derived = ratio / (1 + ratio), True
-                if sp is None and lp is not None:
-                    sp = 1 - lp
-                lp_pct = lp * 100 if lp is not None else None
-                sp_pct = sp * 100 if sp is not None else (100 - lp_pct if lp_pct is not None else None)
-                hist = []
-                for row in top_rows:
-                    stamp = timestamp(row)
-                    r = number(row.get("longShortRatio"))
-                    l = number(row.get("longAccount"))
-                    sh = number(row.get("shortAccount"))
-                    if stamp is None:
-                        continue
-                    if l is None and r is not None and r >= 0:
-                        l, derived = r / (1 + r), True
-                    if sh is None and l is not None:
-                        sh = 1 - l
-                    hist.append({"timestamp": int(stamp), "time": _iso_from_ms(stamp), "ratio": r,
-                                 "percent_long": l * 100 if l is not None else None,
-                                 "percent_short": sh * 100 if sh is not None else None,
-                                 "percentages_derived": derived})
-                return {"ratio": ratio, "long": lp_pct, "short": sp_pct, "percentages_derived": derived,
-                        "history": hist, "updated_at": _iso_from_ms(timestamp(latest)) if latest else None}
-
-            top_accounts = ratio_payload("top_accounts") if key_configured else {"ratio": None, "long": None, "short": None, "percentages_derived": False, "history": [], "updated_at": None}
-            top_positions = ratio_payload("top_positions") if key_configured else {"ratio": None, "long": None, "short": None, "percentages_derived": False, "history": [], "updated_at": None}
+            # Top-trader endpoints are intentionally not requested: they require
+            # authenticated exchange access and are not needed for the public market
+            # positioning panel. Keep null legacy fields for older clients.
+            empty_top_traders = {"ratio": None, "long": None, "short": None,
+                                 "percentages_derived": False, "history": [], "updated_at": None}
+            top_accounts = dict(empty_top_traders)
+            top_positions = dict(empty_top_traders)
 
             funding_rows = sorted(rows("funding_history"), key=lambda row: timestamp(row) if timestamp(row) is not None else -1)
             funding_points = []
             for row in funding_rows:
                 stamp = timestamp(row)
                 rate = number(row.get("fundingRate"))
-                if stamp is None:
+                if stamp is None or rate is None:
                     continue
                 funding_points.append({"timestamp": int(stamp), "time": _iso_from_ms(stamp), "funding_rate": rate,
-                                       "funding_rate_pct": rate * 100 if rate is not None else None,
+                                       "funding_rate_pct": rate * 100,
                                        "mark_price": number(row.get("markPrice"))})
+            funding_valid_rows = [row for row in funding_rows if timestamp(row) is not None and number(row.get("fundingRate")) is not None]
+            funding_coverage = history_coverage(funding_valid_rows)
 
             basis_rows = sorted(rows("basis_history"), key=lambda row: timestamp(row) if timestamp(row) is not None else -1)
             basis_points = []
+            basis_rate_rows = []
             for row in basis_rows:
                 stamp = timestamp(row)
                 if stamp is None:
                     continue
                 rate = number(row.get("basisRate"))
                 annualized = number(row.get("annualizedBasisRate"))
+                basis_usdt = number(row.get("basis"))
+                futures_price = number(row.get("futuresPrice"))
+                index_value = number(row.get("indexPrice"))
+                if all(value is None for value in (rate, annualized, basis_usdt, futures_price, index_value)):
+                    continue
                 basis_points.append({"timestamp": int(stamp), "time": _iso_from_ms(stamp),
                                      "basis_rate_pct": rate * 100 if rate is not None else None,
                                      "annualized_basis_pct": annualized * 100 if annualized is not None else None,
-                                     "basis_usdt": number(row.get("basis")),
-                                     "futures_price": number(row.get("futuresPrice")),
-                                     "index_price": number(row.get("indexPrice"))})
+                                     "basis_usdt": basis_usdt,
+                                     "futures_price": futures_price,
+                                     "index_price": index_value})
+                if rate is not None:
+                    basis_rate_rows.append(row)
             latest_basis = basis_points[-1] if basis_points else {}
-            basis_coverage = history_coverage(basis_rows)
+            basis_coverage = history_coverage(basis_rate_rows)
 
             ticker = data.get("ticker_24h") if isinstance(data.get("ticker_24h"), dict) else {}
             price_change_24h = number(ticker.get("priceChangePercent"))
@@ -361,11 +344,11 @@ class MarketAnalyticsService:
                                       "open_interest": None, "funding_rate": None,
                                       "buy_volume": buy, "sell_volume": sell})
 
-            if all(value is None for value in (funding_rate, open_interest_value, ls_ratio, top_positions.get("ratio"))):
+            if all(value is None for value in (funding_rate, open_interest_value, ls_ratio)):
                 raise AnalyticsUnavailable("DERIVATIVES_UNAVAILABLE")
 
-            funding_latest_stamp = timestamp(funding_rows[-1]) if funding_rows else None
-            basis_latest_stamp = timestamp(basis_rows[-1]) if basis_rows else None
+            funding_latest_stamp = timestamp(funding_valid_rows[-1]) if funding_valid_rows else None
+            basis_latest_stamp = timestamp(basis_rate_rows[-1]) if basis_rate_rows else (timestamp(basis_rows[-1]) if basis_rows else None)
             ls_latest_stamp = timestamp(ls_rows[-1]) if ls_rows else None
             oi_status = "unavailable" if not oi_points else ("available" if (oi_coverage or 0) >= 23 else "partial")
             source = "binance-futures"
@@ -373,11 +356,9 @@ class MarketAnalyticsService:
                 "funding": {"status": "available" if funding_rate is not None else "unavailable", "updated_at": _iso_from_ms(number(funding.get("time")) or now * 1000), "age_seconds": None, "points": 1, "source": source},
                 "open_interest_history": {"status": oi_status, "updated_at": _iso_from_ms(oi_points[-1]["timestamp"]) if oi_points else None, "age_seconds": max(0.0, now - oi_points[-1]["timestamp"] / 1000.0) if oi_points else None, "points": len(oi_points), "coverage_hours": oi_coverage, "source": source},
                 "long_short_ratio": {"status": "unavailable" if not ls_rows else ("available" if (ls_coverage or 0) >= 23 else "partial"), "updated_at": _iso_from_ms(ls_latest_stamp), "age_seconds": max(0.0, now - ls_latest_stamp / 1000.0) if ls_latest_stamp else None, "points": len(ls_rows), "coverage_hours": ls_coverage, "source": source},
-                "funding_history": {"status": "available" if funding_points else "unavailable", "updated_at": _iso_from_ms(funding_latest_stamp), "age_seconds": max(0.0, now - funding_latest_stamp / 1000.0) if funding_latest_stamp else None, "points": len(funding_points), "source": source},
+                "funding_history": {"status": "available" if funding_points else "unavailable", "updated_at": _iso_from_ms(funding_latest_stamp), "age_seconds": max(0.0, now - funding_latest_stamp / 1000.0) if funding_latest_stamp else None, "points": len(funding_points), "coverage_hours": funding_coverage, "source": source},
                 "basis": {"status": "available" if basis_points else "unavailable", "updated_at": _iso_from_ms(basis_latest_stamp), "age_seconds": max(0.0, now - basis_latest_stamp / 1000.0) if basis_latest_stamp else None, "points": len(basis_points), "coverage_hours": basis_coverage, "source": source},
                 "taker_flow": {"status": "available" if taker_rows else "unavailable", "updated_at": _iso_from_ms(timestamp(taker_rows[-1]) if taker_rows else None), "points": len(taker_rows), "source": source},
-                "top_trader_accounts": {"status": "api_key_missing" if not key_configured else ("available" if top_accounts["history"] else "unavailable"), "updated_at": top_accounts.get("updated_at"), "points": len(top_accounts["history"]), "source": source},
-                "top_trader_positions": {"status": "api_key_missing" if not key_configured else ("available" if top_positions["history"] else "unavailable"), "updated_at": top_positions.get("updated_at"), "points": len(top_positions["history"]), "source": source},
             }
             factors = []
             if funding_rate is not None:
@@ -400,12 +381,12 @@ class MarketAnalyticsService:
             market_reading = {"bias": bias, "summary": " ".join(factors) if factors else "Las fuentes no ofrecen suficientes métricas simultáneas para una lectura combinada.", "factors": factors, "factor_count": len(factors)}
             raw = {"funding": funding_rate, "next_funding_ms": next_funding_ms, "premium_pct": premium_pct,
                    "oi_value": open_interest_value, "oi_change_1h": oi_change_1h, "oi_change_24h": oi_change_24h,
-                   "ls_ratio": ls_ratio, "ls_long_pct": ls_long_pct, "ls_ratio_24h": ls_24_ratio,
-                   "top_ratio": top_positions.get("ratio")}
+                   "ls_ratio": ls_ratio, "ls_long_pct": ls_long_pct, "ls_ratio_24h": ls_24_ratio}
             output = {
                 "symbol": symbol, "funding_rate": funding_rate, "funding_next": _iso_from_ms(next_funding_ms),
                 "funding_updated_at": _iso_from_ms(number(funding.get("time")) or now * 1000),
-                "funding_history": funding_points, "basis_history": basis_points,
+                "funding_history": funding_points, "funding_history_coverage_hours": funding_coverage,
+                "basis_history": basis_points,
                 "basis_rate_pct": latest_basis.get("basis_rate_pct"),
                 "annualized_basis_pct": latest_basis.get("annualized_basis_pct"),
                 "basis_observed_at": _iso_from_ms(basis_latest_stamp), "basis_coverage_hours": basis_coverage,
@@ -424,7 +405,7 @@ class MarketAnalyticsService:
                                      "percent_short_24h_ago": ls_24_short, "value_24h_ago": ls_24_ratio,
                                      "history": ls_history, "updated_at": _iso_from_ms(ls_latest_stamp), "coverage_hours": ls_coverage},
                 "top_trader_accounts": top_accounts, "top_trader_positions": top_positions,
-                "top_trader_ratio": {"ratio": top_positions.get("ratio"), "long": top_positions.get("long"), "short": top_positions.get("short")},
+                "top_trader_ratio": {"ratio": None, "long": None, "short": None},
                 "taker_flow": {"windows": taker_windows, "history": taker_history},
                 "market_reading": market_reading, "sources": sources,
                 "reading": " ".join(derivatives_engine.interpret(raw)), "updated_at": utc_iso(now), "raw": raw,
