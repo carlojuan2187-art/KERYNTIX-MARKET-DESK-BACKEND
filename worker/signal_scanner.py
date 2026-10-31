@@ -232,6 +232,7 @@ class SignalScanner:
         interval_seconds: int = SCAN_INTERVAL_SECONDS,
         request_delay_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
+        signal_notifier: Any | None = None,
     ) -> None:
         self.market_client = market_client
         self.repository = repository
@@ -244,6 +245,7 @@ class SignalScanner:
         self.interval_seconds = max(10, int(interval_seconds))
         self.request_delay_seconds = max(0.0, float(os.getenv("BINANCE_REQUEST_DELAY", "0.2") if request_delay_seconds is None else request_delay_seconds))
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.signal_notifier = signal_notifier
         self._stop = asyncio.Event()
         self._rate_lock = asyncio.Lock()
         self._last_request_started = 0.0
@@ -401,6 +403,14 @@ class SignalScanner:
                 continue
             if created:
                 signals_created += 1
+                if self.signal_notifier is not None:
+                    try:
+                        notice_status = await self.signal_notifier.notify_new_signal(document, now=current_time)
+                        logger.info("Notificación de señal %s %s: %s", symbol, direction, notice_status)
+                    except Exception:
+                        # Signal persistence must not be rolled back by a notification
+                        # subsystem failure. Notification delivery remains isolated.
+                        logger.exception("Falló el despacho de notificaciones para señal %s %s", symbol, direction)
                 await self._publish_signal(document)
                 logger.info("Señal web guardada %s %s score=%.2f visibility=%s", symbol, direction, float(candidate.get("score") or 0), visibility)
                 # Bot behavior: one signal per profile/scan cycle.
@@ -467,15 +477,26 @@ class SignalScanner:
 
 async def _run_worker() -> None:
     configure_logging()
+    from api.repositories.auth import auth_repository_from_environment
+    from api.repositories.user_features import user_feature_repository_from_environment
+    from worker.user_alerts import UserAlertProcessor
+
     repository = repository_from_environment()
     repo_health = repository.health()
     if not repo_health.get("persistent") and os.getenv("SIGNAL_ENGINE_ALLOW_MEMORY", "false").lower() not in {"1", "true", "yes"}:
         raise RuntimeError("El worker necesita MongoDB persistente. Para una prueba aislada, permite memoria con SIGNAL_ENGINE_ALLOW_MEMORY=true (no compartirá datos con otra instancia de la API).")
+    auth = auth_repository_from_environment()
+    features = user_feature_repository_from_environment()
+    production = os.getenv("FTRADE_ENV", "development").strip().lower() == "production"
+    if production and (not auth.health().get("persistent") or not features.health().get("persistent")):
+        raise RuntimeError("El worker de señales necesita repositorios persistentes para encolar notificaciones de forma compartida")
+
     sweeps = sweep_store_from_environment()
     cache = cache_from_environment()
     rest = BinanceRestClient()
-    scanner = SignalScanner(rest, repository, sweeps, cache=cache)
-    logger.info("Worker de señales iniciado; almacenamiento=%s", repo_health.get("adapter"))
+    notifier = UserAlertProcessor(auth, features, cache)
+    scanner = SignalScanner(rest, repository, sweeps, cache=cache, signal_notifier=notifier)
+    logger.info("Worker de señales iniciado; almacenamiento=%s; notificaciones=activas", repo_health.get("adapter"))
     try:
         from worker.distributed_lease import DistributedWorkerLease
         async with DistributedWorkerLease(cache, "signal-scanner"):
@@ -484,9 +505,10 @@ async def _run_worker() -> None:
         await rest.close()
         await cache.close()
         sweeps.close()
-        close = getattr(repository, "close", None)
-        if callable(close):
-            close()
+        for resource in (features, auth, repository):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
 
 
 def main() -> None:

@@ -183,6 +183,88 @@ class UserAlertProcessor:
         user_id = str(user.get("user_id") or "")
         return bool(user_id and evaluate_access(user, now=now, is_admin=is_admin_user(user))["allowed"])
 
+    async def notify_new_signal(self, signal: Mapping[str, Any], *, now: datetime | None = None) -> dict[str, int]:
+        """Create durable per-user notifications for a newly persisted signal.
+
+        Signals use the existing `signals` preference and notification outboxes, so
+        Telegram, Web Push and the in-app inbox follow the same delivery/retry rules
+        as market anomalies. The stable event id makes repeated scanner attempts safe.
+        """
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        else:
+            current = current.astimezone(timezone.utc)
+
+        signal_id = str(signal.get("id") or signal.get("signal_id") or "").strip()
+        symbol = str(signal.get("symbol") or "").strip().upper()
+        direction = str(signal.get("direction") or "").strip().upper()
+        visibility = str(signal.get("visibility") or "premium").strip().lower()
+        if not signal_id or not symbol or direction not in {"LONG", "SHORT"}:
+            return {"users_scanned": 0, "notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+
+        try:
+            users = await asyncio.to_thread(self.auth.list_users_for_alerts, limit=5000)
+        except Exception:
+            logger.exception("No se pudo obtener la lista de usuarios para notificar una señal")
+            return {"users_scanned": 0, "notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+
+        entry = signal.get("entry_price")
+        stop = signal.get("stop_loss")
+        targets = signal.get("take_profits") if isinstance(signal.get("take_profits"), list) else []
+        score = _num(signal.get("score"))
+
+        def price_text(value: Any) -> str:
+            parsed = _num(value)
+            return f"{parsed:,.8g}" if parsed is not None else "—"
+
+        details = [f"Entrada: {price_text(entry)}", f"Stop-loss: {price_text(stop)}"]
+        valid_targets = [price_text(value) for value in targets if _num(value) is not None]
+        if valid_targets:
+            details.append("Objetivos: " + " / ".join(valid_targets[:3]))
+        if score is not None:
+            details.append(f"Score: {score:.1f}/100")
+        title = f"Nueva señal {direction} · {symbol}"
+        message = f"FTrade publicó una nueva señal {direction} para {symbol}.\n" + " · ".join(details)
+        event_id = f"signal-created:{signal_id}"
+        metadata = {
+            "signal_id": signal_id,
+            "direction": direction,
+            "visibility": visibility,
+            "entry_price": _num(entry),
+            "stop_loss": _num(stop),
+            "take_profits": [_num(value) for value in targets[:3] if _num(value) is not None],
+            "score": score,
+        }
+
+        counts = {"users_scanned": len(users), "notifications_created": 0,
+                  "telegram_queued": 0, "web_push_queued": 0}
+        for user in users:
+            user_id = str(user.get("user_id") or "")
+            admin = is_admin_user(user)
+            access = evaluate_access(user, now=current, is_admin=admin)
+            if not user_id or not access.get("allowed") or not wants_alert(user, "signals"):
+                continue
+            # Match the market radar: public/free setups can be announced to every
+            # active account; premium setups go only to active Premium/admin users.
+            if visibility not in {"free", "public"} and not (admin or access.get("premium_active")):
+                continue
+            prefs = alert_preferences(user)
+            if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
+                continue
+            try:
+                made, telegram_queued = await self._notify_user(
+                    user, event_id=event_id, kind="signals", title=title, message=message,
+                    symbol=symbol, metadata=metadata, now=current,
+                )
+            except Exception:
+                logger.exception("No se pudo encolar notificación de señal para usuario %s", user_id)
+                continue
+            counts["notifications_created"] += int(made)
+            counts["telegram_queued"] += int(made and telegram_queued)
+            counts["web_push_queued"] += int(made and prefs.get("web_push", False))
+        return counts
+
     async def _notify_user(self, user: Mapping[str, Any], *, event_id: str, kind: str, title: str,
                            message: str, symbol: str | None, metadata: dict[str, Any], now: datetime) -> tuple[bool, bool]:
         user_id = str(user.get("user_id") or "")
