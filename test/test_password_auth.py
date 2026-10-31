@@ -115,3 +115,19 @@ def test_registration_rejects_existing_phone_and_password_schema_is_strict(monke
             "/auth/register", json={"phone": "+442071838750", "password": "short"}
         )
         assert short_password.status_code == 422
+
+
+def test_registration_persists_selected_spanish_language(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    phone = "+17875554321"
+    password = "MercadoSeguro-2026!"
+    with TestClient(app) as client:
+        _token, code = _verify_telegram_for_challenge(
+            client,
+            repo,
+            client.post("/auth/register", json={"phone": phone, "password": password, "language": "es"}),
+        )
+        registered = client.post("/auth/verify", json={"phone": phone, "code": code})
+        assert registered.status_code == 200, registered.text
+        assert registered.json()["user"]["language"] == "es"
+        assert repo.get_user_by_phone(phone)["language"] == "es"

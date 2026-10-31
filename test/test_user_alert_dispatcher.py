@@ -20,7 +20,7 @@ class NoTelegram:
         raise AssertionError("no se debe invocar un Telegram no configurado")
 
 
-def make_user(repo, user_id="watch-alert-user", *, prefs=None, active=True, chat_id=None):
+def make_user(repo, user_id="watch-alert-user", *, prefs=None, active=True, chat_id=None, language="en"):
     now = datetime.now(UTC)
     repo.create_user_if_absent({
         "user_id": user_id, "phone": "+1787555" + str(abs(hash(user_id)) % 100000).zfill(5), "telegram_chat_id": chat_id,
@@ -28,6 +28,7 @@ def make_user(repo, user_id="watch-alert-user", *, prefs=None, active=True, chat
         "plan_end": now + timedelta(days=10) if active else None,
         "trial_end": None, "banned": False, "ref_code": f"ref-{user_id}",
         "alert_prefs": prefs or {"on": True, "liq": True, "mov": True, "vol": True, "price": True, "in_app": True, "telegram": False},
+        "language": language,
     })
 
 
@@ -238,3 +239,31 @@ def test_public_signal_notification_can_reach_an_active_non_premium_user():
     }, now=now))
     assert outcome["notifications_created"] == 1
     assert len(features.list_notifications("trial-public")) == 1
+
+
+def test_new_signal_notifications_follow_each_users_language_preference():
+    auth = InMemoryAuthRepository()
+    signal_prefs = {
+        "on": True, "signals": True, "in_app": True, "telegram": True, "web_push": False,
+        "liq": True, "mov": True, "vol": True,
+    }
+    make_user(auth, "signals-english", prefs=signal_prefs, active=True, chat_id="chat-en", language="en")
+    make_user(auth, "signals-spanish", prefs=signal_prefs, active=True, chat_id="chat-es", language="es")
+    features = InMemoryUserFeatureRepository()
+    cache = InMemoryJsonCache()
+    processor = UserAlertProcessor(auth, features, cache, NoTelegram())
+
+    result = asyncio.run(processor.notify_new_signal({
+        "id": "signal-i18n", "symbol": "BTCUSDT", "direction": "LONG", "visibility": "premium",
+        "entry_price": 65000.0, "stop_loss": 64000.0, "take_profits": [67000.0], "score": 90,
+    }))
+
+    assert result["notifications_created"] == 2
+    english = features.list_notifications("signals-english")[0]
+    spanish = features.list_notifications("signals-spanish")[0]
+    assert english["title"] == "New LONG signal · BTCUSDT"
+    assert "FTrade published a new LONG signal" in english["message"]
+    assert "New LONG signal" in english["telegram_delivery"]["text"]
+    assert spanish["title"] == "Nueva señal LONG · BTCUSDT"
+    assert "FTrade publicó una nueva señal" in spanish["message"]
+    assert "Nueva señal LONG" in spanish["telegram_delivery"]["text"]

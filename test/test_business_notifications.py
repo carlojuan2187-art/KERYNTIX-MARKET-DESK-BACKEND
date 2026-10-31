@@ -39,7 +39,7 @@ class FakePush:
 
 
 def add_user(auth, user_id="u1", *, plan="free", trial_end=None, plan_end=None,
-             chat_id="__auto__", banned=False, prefs=None, referred_by=None, now=None):
+             chat_id="__auto__", banned=False, prefs=None, referred_by=None, now=None, language="en"):
     now = now or datetime.now(UTC)
     doc = {
         "user_id": user_id,
@@ -55,6 +55,7 @@ def add_user(auth, user_id="u1", *, plan="free", trial_end=None, plan_end=None,
         "alert_prefs": prefs or {"on": True, "plans": True, "in_app": True, "telegram": True, "web_push": False},
         "risk_profile": {"capital": 1000, "risk_pct": 1},
         "watchlist": [],
+        "language": language,
     }
     auth.create_user_if_absent(doc)
     return doc
@@ -261,3 +262,26 @@ def test_async_business_notification_publishes_in_app_hint_after_durable_enqueue
     assert channel == "notifications:events:v1"
     assert event["event"] == "notification.created"
     assert event["user_id"] == "u1"
+
+
+def test_business_notifications_are_localized_before_persisting_and_queuing_telegram():
+    auth = InMemoryAuthRepository()
+    add_user(auth, "english-user", language="en", chat_id="chat-en")
+    add_user(auth, "spanish-user", language="es", chat_id="chat-es")
+    features = InMemoryUserFeatureRepository()
+    service = BusinessNotificationService(auth, features)
+
+    english = service.enqueue("english-user", event_id="referral:en", title="Un referido activó Premium",
+                              message="Una persona invitada mediante tu enlace ha activado Premium.",
+                              business_event="referral.premium_activated")
+    spanish = service.enqueue("spanish-user", event_id="referral:es", title="Un referido activó Premium",
+                              message="Una persona invitada mediante tu enlace ha activado Premium.",
+                              business_event="referral.premium_activated")
+
+    english_row = features.list_notifications("english-user")[0]
+    spanish_row = features.list_notifications("spanish-user")[0]
+    assert english["created"] and spanish["created"]
+    assert english_row["title"] == "A referral activated Premium"
+    assert english_row["telegram_delivery"]["text"].startswith("A referral activated Premium")
+    assert spanish_row["title"] == "Un referido activó Premium"
+    assert spanish_row["telegram_delivery"]["text"].startswith("Un referido activó Premium")

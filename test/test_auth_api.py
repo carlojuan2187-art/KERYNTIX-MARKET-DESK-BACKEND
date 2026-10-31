@@ -79,6 +79,7 @@ def test_phone_telegram_code_creates_free_trial_user_and_httponly_refresh(monkey
         assert payload["is_new"] is True
         assert payload["user"]["phone"] == "+17875551234"
         assert payload["user"]["plan"] == "free"
+        assert payload["user"]["language"] == "en"
         assert payload["user"]["telegram_chat_id"] == "4242"
         assert payload["user"]["is_admin"] is False
         assert payload["user"]["alert_prefs"] == {"on": True, "liq": True, "mov": True, "vol": True}
@@ -148,12 +149,15 @@ def test_patch_me_allows_only_preferences_and_rejects_bad_timezone(monkeypatch):
         headers = {"Authorization": f"Bearer {access}"}
         bad = client.patch("/auth/me", json={"tz": "Not/AZone"}, headers=headers)
         assert bad.status_code == 422
-        good = client.patch("/auth/me", json={"tz": "America/Puerto_Rico", "exchange": "Binance", "risk_profile": {"capital": 500, "risk_pct": 1.5}}, headers=headers)
+        good = client.patch("/auth/me", json={"tz": "America/Puerto_Rico", "exchange": "Binance", "language": "es", "risk_profile": {"capital": 500, "risk_pct": 1.5}}, headers=headers)
         assert good.status_code == 200, good.text
         body = good.json()
         assert body["tz"] == "America/Puerto_Rico"
+        assert body["language"] == "es"
         assert body["exchange"] == "Binance"
         assert body["risk_profile"] == {"capital": 500, "risk_pct": 1.5}
+        bad_language = client.patch("/auth/me", json={"language": "fr"}, headers=headers)
+        assert bad_language.status_code == 422
         forbidden = client.patch("/auth/me", json={"plan": "premium"}, headers=headers)
         assert forbidden.status_code == 422
 
