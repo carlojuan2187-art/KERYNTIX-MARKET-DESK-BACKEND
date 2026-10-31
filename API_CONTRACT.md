@@ -50,7 +50,7 @@ El flujo de la web separa `Iniciar sesión` y `Crear cuenta`: el login normal ut
 
 El enlace del bot tiene la forma `https://t.me/<BOT_USERNAME>?start=verify_<token>`. No se usa Telegram Login Widget ni interfaces de chat. El botón de simulación no corresponde a un endpoint de producción.
 
-Un nuevo registro recibe `plan:"free"`, `trial_end = now + TRIAL_DAYS`, preferencias de avisos activas y `tz:"America/Havana"`. `is_new` activa el aviso de bienvenida solo en ese registro. El frontend conserva temporalmente un código de referido de `/r/ref_<user_id>`; el backend debe resolverlo y rechazar auto-referidos.
+Un nuevo registro recibe `plan:"free"`, `trial_end = now + TRIAL_DAYS`, preferencias de avisos activas y `tz:"America/Havana"`. La prueba gratuita predeterminada dura 5 días y concede el conjunto completo de funciones Premium (señales, radar, mercado, derivados, estadísticas y avisos), sin limitaciones funcionales durante ese período. Al alcanzar `trial_end`, el acceso a las funciones de la plataforma queda bloqueado si no existe una suscripción Premium vigente; se mantienen disponibles únicamente cuenta, planes/pagos y soporte para poder reactivar el servicio. `is_new` activa el aviso de bienvenida solo en ese registro. El frontend conserva temporalmente un código de referido de `/r/ref_<user_id>`; el backend debe resolverlo y rechazar auto-referidos.
 
 `User` conserva exactamente: `user_id, phone, telegram_chat_id, username, plan, trial_end, plan_end, ref_code, referred_by, ref_premium_valid, exchange, risk_profile, watchlist, alert_prefs, tz, banned, ban_until, banned_at, banned_by, created_at, last_activity`. `is_admin` es un indicador adicional de autorización de la sesión, establecido solo por el servidor.
 
@@ -171,7 +171,7 @@ La Notification API del navegador con la página abierta no equivale a Web Push.
 
 `PaymentSession = {price:string,wallet_dest:string,record:PaymentRecord,expires_at}`. `PaymentRecord = {id,amount_usdt:string,wallet_from?,status,created_at,updated_at?,confirmations?}`. Estados exactos: `pending|verifying|confirmed|expired|failed`. No usar `verified`.
 
-Precio = PREMIUM_PRICE_USDT (40) + un sufijo de 0.001 a 0.099, único entre solicitudes activas. La ventana dura 180 minutos. El backend valida red BEP20, token USDT, monto, origen y destino, y espera 12 confirmaciones. Una confirmación ya aplicada es **idempotente**. `plan_end = max(now,plan_end activo) + 30 días`; la prueba no cambia. La demo suma 4 confirmaciones por consulta y no lee la cadena. Una wallet cero provoca fallo de ejemplo. El QR codifica únicamente la dirección de destino simulada; no debe usarse para transferir fondos.
+Precio = PREMIUM_PRICE_USDT (10 por defecto) + un sufijo de 0.001 a 0.099, único entre solicitudes activas. La ventana dura 180 minutos. El backend valida red BEP20, token USDT, monto, origen y destino, y espera 12 confirmaciones. Una confirmación ya aplicada es **idempotente**. `plan_end = max(now,plan_end activo) + 30 días`; la prueba no cambia. La demo suma 4 confirmaciones por consulta y no lee la cadena. Una wallet cero provoca fallo de ejemplo. El QR codifica únicamente la dirección de destino simulada; no debe usarse para transferir fondos.
 
 `ReferralSummary = {link,progress:{current,target:5},referrals:[{user_id,username,created_at,activated_premium_at:null|string}],rewards:[{id,days,created_at}]}`. Solo una activación Premium suma al progreso. Cada grupo de 5 activa o amplía Premium 30 días. Dos activaciones no producen dos recompensas: el ejemplo no tiene ninguna obtenida todavía.
 

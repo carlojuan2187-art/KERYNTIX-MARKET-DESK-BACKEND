@@ -130,11 +130,21 @@ def _production_configuration_issues() -> list[str]:
         rpc_url = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org").strip()
         if not rpc_url.startswith("https://"):
             issues.append("BSC_RPC_URL_MUST_USE_HTTPS")
-        price = Decimal(os.getenv("PREMIUM_PRICE_USDT", "40.00"))
+        price = Decimal(os.getenv("PREMIUM_PRICE_USDT", "10.00"))
         if not price.is_finite() or price <= 0 or price.quantize(Decimal("0.001")) != price:
             issues.append("PREMIUM_PRICE_INVALID")
+        elif price != Decimal("10.00"):
+            issues.append("PREMIUM_PRICE_MUST_BE_10_USDT")
     except (InvalidOperation, TypeError, ValueError):
         issues.append("PAYMENT_CONFIGURATION_INVALID")
+
+    try:
+        configured_trial_days = int(os.getenv("TRIAL_DAYS", "5"))
+        if configured_trial_days != 5:
+            if "TRIAL_DAYS_MUST_BE_5" not in issues:
+                issues.append("TRIAL_DAYS_MUST_BE_5")
+    except (TypeError, ValueError):
+        issues.append("TRIAL_DAYS_INVALID")
 
     origins = [value.strip() for value in os.getenv("CORS_ORIGINS", "").split(",") if value.strip()]
     invalid_origin = False
