@@ -24,6 +24,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 
 from api.cache import JsonCache, cache_from_environment
@@ -365,6 +366,11 @@ def create_app(
         if os.getenv("FTRADE_ENV", "development").strip().lower() == "production":
             response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
         return response
+
+    # Compress JSON responses (e.g. /market/quotes is ~400 KB of repetitive JSON).
+    # Starlette's default level (9) is CPU-heavy; level 4 keeps ~85-90% of the savings.
+    # Added before CORS so CORS stays the outermost middleware. WebSockets are not touched.
+    app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=int(os.getenv("GZIP_LEVEL", "4")))
 
     cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
     if cors_origins:
