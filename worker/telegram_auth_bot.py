@@ -85,8 +85,16 @@ class TelegramAuthBot:
         if not challenge:
             self.send(chat_id, "El enlace no es válido. Vuelve a la web de FTrade y solicita uno nuevo.")
             return
-        expected_flow = "login" if flow_prefix == "verify" else "link"
-        if challenge.get("flow") != expected_flow:
+        challenge_flow = str(challenge.get("flow") or "")
+        # Registration also uses the public `verify_<token>` deep link. It is a
+        # separate auth challenge (`register`) but follows the same contact-share
+        # handshake as a normal login challenge.
+        flow_matches = (
+            challenge_flow in {"login", "register"}
+            if flow_prefix == "verify"
+            else challenge_flow == "link"
+        )
+        if not flow_matches:
             self.send(chat_id, "Este enlace no corresponde a esta operación.")
             return
         expires = as_utc(challenge.get("link_expires_at"))

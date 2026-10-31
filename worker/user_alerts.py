@@ -246,9 +246,12 @@ class UserAlertProcessor:
             access = evaluate_access(user, now=current, is_admin=admin)
             if not user_id or not access.get("allowed") or not wants_alert(user, "signals"):
                 continue
-            # Match the market radar: public/free setups can be announced to every
-            # active account; premium setups go only to active Premium/admin users.
-            if visibility not in {"free", "public"} and not (admin or access.get("premium_active")):
+            # A live five-day trial has the same feature entitlement as Premium.
+            # Premium-only signals must therefore reach paid Premium, trial, and
+            # administrator accounts, but never expired/free accounts.
+            if visibility not in {"free", "public"} and not (
+                admin or access.get("premium_active") or access.get("trial_active")
+            ):
                 continue
             prefs = alert_preferences(user)
             if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
