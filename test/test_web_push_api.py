@@ -169,3 +169,32 @@ def test_zero_expiration_timestamp_is_rejected_as_expired():
     assert response.status_code == 422
     assert response.json()["code"] == "PUSH_SUBSCRIPTION_EXPIRED"
     assert features.active_push_subscription_count(principal.user_id) == 0
+
+
+def test_delete_current_subscription_only_removes_authenticated_users_exact_endpoint():
+    app, _auth, features, principal = setup()
+    endpoint = subscription("current")
+    with TestClient(app) as client:
+        created = client.post("/push/subscriptions", json=endpoint)
+        assert created.status_code == 201, created.text
+        other = subscription("other")
+        client.post("/push/subscriptions", json=other)
+        deleted = client.request("DELETE", "/push/subscriptions/current", json={"endpoint": endpoint["endpoint"]})
+        assert deleted.status_code == 204
+        remaining = features.list_push_subscriptions(principal.user_id, limit=10)
+        assert len(remaining) == 1
+        assert remaining[0]["endpoint"] == other["endpoint"]
+        # Deleting the same browser endpoint again is safe and idempotent.
+        again = client.request("DELETE", "/push/subscriptions/current", json={"endpoint": endpoint["endpoint"]})
+        assert again.status_code == 204
+
+
+def test_api_responses_include_baseline_security_headers():
+    app, _auth, _features, _principal = setup()
+    with TestClient(app) as client:
+        response = client.get("/push/vapid-public-key")
+        assert response.status_code == 200
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+        assert "geolocation=()" in response.headers["permissions-policy"]

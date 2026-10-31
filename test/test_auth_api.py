@@ -358,3 +358,31 @@ def test_auth_route_refuses_placeholder_telegram_configuration(monkeypatch):
         response = client.post("/auth/phone", json={"phone": "+17875551234"})
     assert response.status_code == 503
     assert response.json()["code"] == "TELEGRAM_NOT_CONFIGURED"
+
+
+def test_cookie_only_refresh_mode_ignores_body_refresh_token(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    monkeypatch.setenv("AUTH_REFRESH_IN_BODY", "false")
+    with TestClient(app) as client:
+        _token, code = challenge_and_link(client, repo)
+        login = client.post("/auth/verify", json={"phone": "+17875551234", "code": code})
+        assert login.status_code == 200
+        assert login.json()["refresh_token"] is None
+        cookie_token = login.cookies.get("ftrade_refresh")
+        assert cookie_token
+        # The actual, valid refresh token is intentionally removed from cookies;
+        # cookie-only mode must not accept the same credential from the JSON body.
+        client.cookies.clear()
+        denied = client.post("/auth/refresh", json={"refresh_token": cookie_token})
+        assert denied.status_code == 401
+
+
+def test_configurable_refresh_cookie_samesite(monkeypatch):
+    from api.services.auth import refresh_cookie_samesite
+    monkeypatch.setenv("FTRADE_ENV", "production")
+    monkeypatch.setenv("AUTH_COOKIE_SAMESITE", "lax")
+    assert refresh_cookie_samesite() == "lax"
+    monkeypatch.setenv("AUTH_COOKIE_SAMESITE", "none")
+    monkeypatch.setenv("AUTH_COOKIE_SECURE", "false")
+    # Production cookie issuance forces Secure independently of this dev override.
+    assert refresh_cookie_samesite() == "none"
