@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from api.security import Principal, require_analytical_access
 from api.services.web_push import WebPushService
-from api.web_push_schemas import WebPushSubscriptionCreate
+from api.web_push_schemas import WebPushSubscriptionCreate, WebPushSubscriptionDelete
 
 router = APIRouter(tags=["web-push"])
 
@@ -32,6 +32,14 @@ def register_push_subscription(body: WebPushSubscriptionCreate, request: Request
         principal.user_id, body.model_dump(by_alias=False),
         user_agent=request.headers.get("user-agent"),
     )
+
+
+@router.delete("/push/subscriptions/current", status_code=status.HTTP_204_NO_CONTENT)
+def delete_current_push_subscription(body: WebPushSubscriptionDelete, request: Request,
+                                     principal: Principal = Depends(require_analytical_access)) -> Response:
+    # Idempotent: browser-side unsubscribe can be retried safely after a timeout.
+    _service(request).delete_current(principal.user_id, body.endpoint)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/push/subscriptions/{subscription_id}", status_code=status.HTTP_204_NO_CONTENT)

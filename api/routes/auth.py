@@ -88,7 +88,10 @@ def refresh_session(request: Request, response: Response, body: RefreshRequest |
                     refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> dict:
     # The HttpOnly cookie is preferred; the body token is a fallback for browsers
     # that drop third-party cookies (Safari/ITP, Brave, in-app browsers).
-    access_token, new_refresh, expires_at = _service(request).refresh(refresh_token, fallback_token=body.refresh_token if body else None)
+    # Cookie-only mode ignores refresh tokens supplied in JSON. This is intended
+    # for deployments where the frontend and API share a site and HttpOnly cookies work.
+    fallback = body.refresh_token if body and refresh_in_body_enabled() else None
+    access_token, new_refresh, expires_at = _service(request).refresh(refresh_token, fallback_token=fallback)
     _service(request).set_refresh_cookie(response, new_refresh, expires_at=expires_at)
     return {"access_token": access_token, "refresh_token": new_refresh if refresh_in_body_enabled() else None}
 
@@ -96,7 +99,8 @@ def refresh_session(request: Request, response: Response, body: RefreshRequest |
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(request: Request, response: Response, body: RefreshRequest | None = None,
            refresh_token: str | None = Cookie(default=None, alias=ACCESS_COOKIE_NAME)) -> Response:
-    revoked = _service(request).logout(refresh_token) or (bool(body and body.refresh_token) and _service(request).logout(body.refresh_token))
+    fallback_token = body.refresh_token if body and refresh_in_body_enabled() else None
+    revoked = _service(request).logout(refresh_token) or (bool(fallback_token) and _service(request).logout(fallback_token))
     _service(request).clear_refresh_cookie(response)
     if not revoked:
         raise HTTPException(status_code=401, detail={"code": "UNAUTHENTICATED", "message": "La sesión de renovación no existe o ya fue revocada."})
