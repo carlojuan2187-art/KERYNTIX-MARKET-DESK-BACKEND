@@ -24,7 +24,11 @@ Regla canónica de acceso: el servidor evalúa `domain/plans.py` con el registro
 
 | Método y ruta                        | Request                                                 | Response 200                                                  | Errores adicionales                          |
 | ------------------------------------ | ------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------- |
-| `POST /auth/phone`                   | `{phone}` E.164                                         | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 422 teléfono inválido; 429 frecuencia        |
+| `POST /auth/register`                | `{phone,password,ref_code?}`; teléfono E.164 y contraseña de 10–128 caracteres | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 409 teléfono registrado; 422 input; 429 frecuencia |
+| `POST /auth/login`                   | `{phone,password}`; teléfono E.164                      | `{access_token,user:User,is_new:false}` + cookie refresh     | 401 credenciales inválidas; 409 `PASSWORD_SETUP_REQUIRED`; 429 intentos |
+| `POST /auth/recover`                 | `{phone}` E.164; cuenta existente                        | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 404 cuenta; 429 frecuencia                  |
+| `POST /auth/password`                | `{password}`; sesión verificada requerida                | `User` actualizado                                           | 401 sesión; 422 contraseña                   |
+| `POST /auth/phone`                   | `{phone}` E.164; compatibilidad con clientes antiguos    | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 422 teléfono inválido; 429 frecuencia        |
 | `GET /auth/telegram-check?token=...` | Query `token`                                           | `{linked,telegram_chat_id?}`                                  | 404 solicitud; 410 vencida                   |
 | `POST /auth/verify`                  | `{phone,code}`                                          | `{access_token,user:User,is_new}` + cookie refresh            | 422 código; 410 vencido; 429 tras 5 intentos |
 | `POST /auth/resend`                  | `{token}`                                               | `{expires_at,resend_at}`                                      | 404 solicitud; 429 antes de 60s              |
@@ -41,6 +45,8 @@ Regla canónica de acceso: el servidor evalúa `domain/plans.py` con el registro
 | `DELETE /sessions/:id`               | ID de sesión                                            | 204                                                           | 404 sesión ajena/inexistente                 |
 
 `SessionRecord = {id,device,location,current,last_activity}`. En producción la asignación de `telegram_chat_id` debe ocurrir exclusivamente después de verificar el contacto en el backend. El cambio directo del campo en la demo no es un mecanismo de vinculación de producción.
+
+El flujo de la web separa `Iniciar sesión` y `Crear cuenta`: el login normal utiliza teléfono + contraseña y no abre Telegram. El registro utiliza teléfono + contraseña y exige verificación por Telegram antes de crear la cuenta. La recuperación de contraseña también exige Telegram. Las cuentas creadas antes de incorporar contraseñas deben completar una única configuración mediante `POST /auth/recover`, `POST /auth/verify` y `POST /auth/password`; mientras no tengan una contraseña configurada, `POST /auth/login` responde `409 PASSWORD_SETUP_REQUIRED`. Las contraseñas se almacenan como hash PBKDF2-HMAC-SHA256 con salt individual; nunca se devuelven en las respuestas.
 
 El enlace del bot tiene la forma `https://t.me/<BOT_USERNAME>?start=verify_<token>`. No se usa Telegram Login Widget ni interfaces de chat. El botón de simulación no corresponde a un endpoint de producción.
 
