@@ -29,6 +29,7 @@ from engine.outcome_logic import (
     OPEN_STATES,
     RESULT_INVALID,
     STATE_CLOSED,
+    STATE_OPEN,
     advance_trade,
     build_result_doc,
 )
@@ -40,6 +41,7 @@ MONITOR_INTERVAL_SECONDS = max(2, int(os.getenv("SIGNAL_MONITOR_INTERVAL_SECONDS
 MONITOR_ERROR_BACKOFF_SECONDS = max(5, int(os.getenv("SIGNAL_MONITOR_ERROR_BACKOFF_SECONDS", "20")))
 HISTORY_RECHECK_SECONDS = max(10, int(os.getenv("SIGNAL_HISTORY_RECHECK_SECONDS", "15")))
 OUTCOME_CHECK_SECONDS = max(5, int(os.getenv("OUTCOME_CHECK_SECONDS", "20")))
+OUTCOME_LIVE_PRICE_MAX_AGE_SECONDS = max(1.0, float(os.getenv("OUTCOME_LIVE_PRICE_MAX_AGE_SECONDS", "5")))
 OUTCOME_MAX_PAGES = max(1, min(100, int(os.getenv("OUTCOME_MAX_PAGES", "10"))))
 MARKET_PRICE_MAX_AGE_SECONDS = max(3, int(os.getenv("MARKET_PRICE_MAX_AGE_SECONDS", "15")))
 REST_PRICE_REFRESH_SECONDS = max(5, int(os.getenv("LIFECYCLE_REST_PRICE_REFRESH_SECONDS", "10")))
@@ -116,6 +118,7 @@ class SignalLifecycleWorker:
         self.interval_seconds = max(2, int(interval_seconds))
         self.history_recheck_seconds = max(10, int(history_recheck_seconds))
         self.outcome_check_seconds = max(5, int(outcome_check_seconds))
+        self.live_price_max_age_seconds = OUTCOME_LIVE_PRICE_MAX_AGE_SECONDS
         self.max_pending = max(10, int(max_pending))
         self.max_open = max(10, int(max_open))
         self._stop = asyncio.Event()
@@ -166,6 +169,139 @@ class SignalLifecycleWorker:
         if self._rest_prices and epoch - self._last_rest_prices_at <= 60:
             return dict(self._rest_prices)
         return {}
+
+    async def _fresh_websocket_prices(self, now: datetime) -> dict[str, tuple[float, datetime]]:
+        """Return only fresh per-symbol quotes from the live websocket feed.
+
+        Never use the 24h REST ticker fallback to move a protective stop: an old
+        REST snapshot is not a reliable event-time observation.
+        """
+        try:
+            quotes = await self.cache.get_json(QUOTES_KEY)
+            status = await self.cache.get_json(FEED_STATUS_KEY) or {}
+        except Exception as exc:
+            logger.debug("No se pudo leer el feed live para resultados (%s)", type(exc).__name__)
+            return {}
+        if not isinstance(quotes, dict) or status.get("source") != "websocket" or status.get("connected") is not True:
+            return {}
+        latest_epoch = status.get("last_price_update_epoch")
+        if not isinstance(latest_epoch, (int, float)):
+            return {}
+        now_epoch = now.replace(tzinfo=timezone.utc).timestamp()
+        if max(0.0, now_epoch - float(latest_epoch)) > self.live_price_max_age_seconds:
+            return {}
+        result: dict[str, tuple[float, datetime]] = {}
+        for symbol, item in quotes.items():
+            if not isinstance(item, Mapping) or not _valid_positive(item.get("price")):
+                continue
+            epoch = item.get("price_updated_epoch", latest_epoch)
+            if not isinstance(epoch, (int, float)):
+                continue
+            if max(0.0, now_epoch - float(epoch)) > self.live_price_max_age_seconds:
+                continue
+            stamp = datetime.fromtimestamp(float(epoch), tz=timezone.utc).replace(tzinfo=None)
+            result[str(symbol).upper()] = (float(item["price"]), stamp)
+        return result
+
+    async def _advance_live_with_candle_catchup(
+        self, signal: Mapping[str, Any], *, price: float, observed_at: datetime, now: datetime,
+    ) -> dict[str, Any]:
+        """Reconcile closed candles before persisting a live level transition.
+
+        Live quotes are sampled snapshots. Before a snapshot can close or advance a
+        trade, replay any closed 1m candles not yet consumed so an older SL/TP event
+        cannot be overwritten by a newer price observation.
+        """
+        preliminary = advance_trade(
+            dict(signal), [], now=now, live_price=price, live_price_at=observed_at,
+        )
+        if not preliminary.get("advanced"):
+            return preliminary
+
+        outcome = dict(signal.get("outcome") or {})
+        tracked = utc_naive(outcome.get("tracked_until")) or utc_naive(signal.get("touched_at"))
+        symbol = str(signal.get("symbol") or "").upper()
+        if tracked is None or not symbol or observed_at <= tracked:
+            return preliminary
+
+        try:
+            candles = await self._fetch_candles_for_group(
+                symbol, tracked + timedelta(milliseconds=1), observed_at,
+            )
+        except Exception as exc:
+            # Do not finalize a live transition using a newer snapshot while older
+            # candle history is unavailable. The next worker pass or candle fallback
+            # can retry without corrupting event order.
+            logger.warning(
+                "Se difiere transición live de %s: no se pudo reconciliar histórico (%s)",
+                _signal_id(signal), type(exc).__name__,
+            )
+            return {
+                "outcome": outcome, "events": [], "closed": None,
+                "levels": preliminary.get("levels"), "advanced": False,
+            }
+
+        replay = advance_trade(dict(signal), candles, now=observed_at)
+        if replay.get("closed") is not None:
+            return replay
+        if not replay.get("advanced"):
+            return preliminary
+
+        replayed_signal = dict(signal)
+        replayed_signal["outcome"] = dict(replay.get("outcome") or {})
+        live_after_replay = advance_trade(
+            replayed_signal, [], now=now, live_price=price, live_price_at=observed_at,
+        )
+        combined = dict(live_after_replay)
+        combined["events"] = list(replay.get("events") or []) + list(live_after_replay.get("events") or [])
+        combined["advanced"] = bool(replay.get("advanced") or live_after_replay.get("advanced"))
+        combined["levels"] = live_after_replay.get("levels") or replay.get("levels")
+        return combined
+
+    async def _persist_outcome_step(self, signal: Mapping[str, Any], step: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
+        """CAS-persist one state transition and publish its user-facing events."""
+        if not step.get("advanced"):
+            return False, dict(signal)
+        outcome_before = dict(signal.get("outcome") or {})
+        new_outcome = dict(step.get("outcome") or {})
+        closed = step.get("closed")
+        levels = step.get("levels")
+        if new_outcome.get("state") == STATE_CLOSED and closed is not None and levels is not None:
+            result_doc = build_result_doc(dict(signal), levels, closed)
+            self.repository.save_result_if_absent(result_doc)
+            new_outcome["r_real"] = closed.get("r_real")
+        expected_tracked = (
+            outcome_before.get("tracked_until") if "tracked_until" in outcome_before
+            else utc_naive(signal.get("touched_at"))
+        )
+        expected_live = utc_naive(outcome_before.get("last_live_price_at"))
+        updated = self.repository.compare_and_set_outcome(
+            signal, expected_tracked, new_outcome, expected_live,
+        )
+        if not updated:
+            return False, dict(signal)
+
+        for event in step.get("events") or []:
+            await self._publish({
+                "type": "signal.outcome.updated",
+                "signal_id": _signal_id(signal), "symbol": signal.get("symbol"),
+                "direction": signal.get("direction"),
+                "event_type": event.get("type"), "result": event.get("result"),
+                "r": event.get("r"), "r_tp1": event.get("r_tp1"),
+                "exit_price": event.get("exit_price"),
+                "protective_stop_price": event.get("protective_stop_price"),
+                "via": event.get("via"),
+                "ambiguous": event.get("ambiguous", False),
+                "event_at": _iso_utc(event.get("at")),
+            })
+        if new_outcome.get("state") == STATE_CLOSED and new_outcome.get("result") == RESULT_INVALID:
+            logger.warning("Señal %s cerrada INVALID por geometría inutilizable", _signal_id(signal))
+        updated_signal = dict(signal)
+        updated_signal["outcome"] = new_outcome
+        if new_outcome.get("state") == STATE_CLOSED:
+            updated_signal["operation_result"] = new_outcome.get("result")
+            updated_signal["r_result"] = new_outcome.get("r_real")
+        return True, updated_signal
 
     async def _candles(self, symbol: str, start_at: datetime, end_at: datetime) -> list[dict[str, Any]]:
         start = utc_naive(start_at) or datetime.utcnow() - timedelta(minutes=10)
@@ -294,25 +430,57 @@ class SignalLifecycleWorker:
 
     async def track_open_trades_once(self, *, now: datetime | None = None, force: bool = False) -> int:
         current_time = utc_naive(now or self.clock()) or datetime.utcnow()
-        if not force and self._last_outcome_scan is not None and (current_time - self._last_outcome_scan).total_seconds() < self.outcome_check_seconds:
-            return 0
-        self._last_outcome_scan = current_time
         open_signals = list(self.repository.list_open(limit=self.max_open))
+        if not open_signals:
+            if force:
+                self._last_outcome_scan = current_time
+            return 0
 
-        # Several signals can be open on the same pair. Fetch closed 1m candles once
-        # per symbol (from the oldest untracked time), then let advance_trade apply
-        # each signal's own tracked_until/touched_at gates. This preserves trade
-        # semantics while avoiding one identical Binance REST request per signal.
-        grouped: dict[str, list[tuple[Mapping[str, Any], datetime]]] = {}
+        changed = 0
+        # First process fresh websocket observations every worker pass (normally
+        # every 2 seconds). Closed 1m candles below remain the recovery mechanism.
+        live_prices = await self._fresh_websocket_prices(current_time)
+        active_signals: list[Mapping[str, Any]] = []
         for signal in open_signals:
+            symbol = str(signal.get("symbol") or "").upper()
+            quote = live_prices.get(symbol)
+            working_signal: Mapping[str, Any] = signal
+            if quote is not None:
+                live_price, live_at = quote
+                live_step = await self._advance_live_with_candle_catchup(
+                    signal, price=live_price, observed_at=live_at, now=current_time,
+                )
+                did_update, persisted_signal = await self._persist_outcome_step(signal, live_step)
+                if did_update:
+                    changed += 1
+                    working_signal = persisted_signal
+                elif live_step.get("advanced"):
+                    # Another worker won the CAS; do not continue with stale state.
+                    continue
+            current_outcome = dict(working_signal.get("outcome") or {})
+            if current_outcome.get("state", STATE_OPEN) in OPEN_STATES:
+                active_signals.append(working_signal)
+
+        candle_due = (
+            force or self._last_outcome_scan is None
+            or (current_time - self._last_outcome_scan).total_seconds() >= self.outcome_check_seconds
+        )
+        if not candle_due:
+            return changed
+        self._last_outcome_scan = current_time
+
+        # Periodically backfill closed 1m candles as a recovery path. A live level
+        # transition first reconciles any older closed candles before it is saved;
+        # this sweep also covers quiet periods and temporary websocket gaps.
+        grouped: dict[str, list[tuple[Mapping[str, Any], datetime]]] = {}
+        for signal in active_signals:
             outcome_before = dict(signal.get("outcome") or {})
             previous_tracked = utc_naive(outcome_before.get("tracked_until")) or utc_naive(signal.get("touched_at"))
             if previous_tracked is None or (current_time - previous_tracked).total_seconds() < 61:
                 continue
             symbol = str(signal.get("symbol") or "").upper()
-            if not symbol:
-                continue
-            grouped.setdefault(symbol, []).append((signal, previous_tracked))
+            if symbol:
+                grouped.setdefault(symbol, []).append((signal, previous_tracked))
 
         symbols = list(grouped)
         candle_results: dict[str, list[dict[str, Any]]] = {}
@@ -345,14 +513,15 @@ class SignalLifecycleWorker:
             for index in range(min(LIFECYCLE_REST_CONCURRENCY, len(symbols)))
         ]
         try:
-            await asyncio.gather(*fetch_tasks)
+            if fetch_tasks:
+                await asyncio.gather(*fetch_tasks)
         finally:
             for task in fetch_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            if fetch_tasks:
+                await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-        changed = 0
         for symbol, signals in grouped.items():
             if symbol in errors:
                 continue
@@ -361,36 +530,9 @@ class SignalLifecycleWorker:
                 continue
             for signal, _previous_tracked in signals:
                 try:
-                    outcome_before = dict(signal.get("outcome") or {})
                     step = advance_trade(dict(signal), candles, now=current_time)
-                    if not step["advanced"]:
-                        continue
-                    new_outcome = dict(step["outcome"])
-                    closed = step["closed"]
-                    levels = step["levels"]
-                    if new_outcome.get("state") == STATE_CLOSED and closed is not None and levels is not None:
-                        result_doc = build_result_doc(dict(signal), levels, closed)
-                        # Canonical web IDs are stable UUIDs; the tracker supports older records too.
-                        self.repository.save_result_if_absent(result_doc)
-                        new_outcome["r_real"] = closed.get("r_real")
-                    expected_tracked = outcome_before.get("tracked_until") if "tracked_until" in outcome_before else utc_naive(signal.get("touched_at"))
-                    updated = self.repository.compare_and_set_outcome(signal, expected_tracked, new_outcome)
-                    if not updated:
-                        continue
-                    event_count = len(step.get("events") or [])
-                    for event in step.get("events") or []:
-                        await self._publish({
-                            "type": "signal.outcome.updated",
-                            "signal_id": _signal_id(signal), "symbol": symbol,
-                            "direction": signal.get("direction"),
-                            "event_type": event.get("type"), "result": event.get("result"),
-                            "r": event.get("r"), "r_tp1": event.get("r_tp1"),
-                            "ambiguous": event.get("ambiguous", False),
-                            "event_at": _iso_utc(event.get("at") or current_time),
-                        })
-                    if new_outcome.get("state") == STATE_CLOSED and new_outcome.get("result") == RESULT_INVALID:
-                        logger.warning("Señal %s cerrada INVALID por geometría inutilizable", _signal_id(signal))
-                    if event_count or new_outcome.get("state") == STATE_CLOSED:
+                    did_update, _persisted = await self._persist_outcome_step(signal, step)
+                    if did_update:
                         changed += 1
                 except Exception:
                     logger.exception("Tracker: error procesando señal %s", _signal_id(signal))

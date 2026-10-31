@@ -270,6 +270,9 @@ class MarketFeedWorker:
                 quote = quote_from_ticker(ticker)
                 if quote is None:
                     continue
+                # Per-symbol event time lets lifecycle tracking distinguish a fresh
+                # websocket observation from a stale quote in the shared snapshot.
+                quote["price_updated_epoch"] = now
                 sparkline = list(previous.get("sparkline", [])) if isinstance(previous.get("sparkline", []), list) else []
                 if not sparkline or sparkline[-1] != quote["price"]:
                     sparkline.append(quote["price"])
