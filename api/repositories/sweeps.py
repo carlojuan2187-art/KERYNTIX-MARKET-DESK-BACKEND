@@ -1,6 +1,8 @@
 """Storage for short-lived observed liquidity sweeps used by the strategy engine."""
 from __future__ import annotations
 
+from api.mongo_config import mongo_pool_options
+
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -80,7 +82,7 @@ class MongoSweepStore:
         except ImportError as exc:  # pragma: no cover
             raise RuntimeError("Instala pymongo para usar el almacenamiento de barridos") from exc
         timeout_ms = max(1000, int(os.getenv("MONGODB_TIMEOUT_MS", "10000")))
-        client = MongoClient(uri, serverSelectionTimeoutMS=timeout_ms, connectTimeoutMS=timeout_ms, socketTimeoutMS=timeout_ms)
+        client = MongoClient(uri, serverSelectionTimeoutMS=timeout_ms, connectTimeoutMS=timeout_ms, socketTimeoutMS=timeout_ms, **mongo_pool_options())
         db = client[name]
         collection = db[os.getenv("SWEEP_OBSERVATIONS_COLLECTION", "observed_sweeps")]
         try:

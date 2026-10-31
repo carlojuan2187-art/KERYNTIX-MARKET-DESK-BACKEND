@@ -5,6 +5,8 @@ only for deterministic tests and local development; it is not cross-process.
 """
 from __future__ import annotations
 
+from api.mongo_config import mongo_pool_options
+
 import os
 import threading
 from copy import deepcopy
@@ -330,7 +332,7 @@ class MongoBusinessRepository:
             raise RuntimeError("MONGODB_URI y DATABASE_NAME son obligatorios para operaciones de negocio persistentes")
         from pymongo import MongoClient
         timeout = max(1000, int(os.getenv("MONGODB_TIMEOUT_MS", "10000")))
-        client = MongoClient(uri, serverSelectionTimeoutMS=timeout, connectTimeoutMS=timeout, socketTimeoutMS=timeout, retryWrites=True)
+        client = MongoClient(uri, serverSelectionTimeoutMS=timeout, connectTimeoutMS=timeout, socketTimeoutMS=timeout, retryWrites=True, **mongo_pool_options())
         return cls(client=client, db=client[db_name], close_client=True)
 
     def expire_payments(self, now: datetime) -> int:

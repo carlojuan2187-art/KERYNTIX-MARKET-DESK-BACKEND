@@ -5,6 +5,8 @@ Production must configure MongoDB; it never silently falls back to memory.
 """
 from __future__ import annotations
 
+from api.mongo_config import mongo_pool_options
+
 import os
 import threading
 from copy import deepcopy
@@ -51,7 +53,7 @@ class AuthRepository(Protocol):
     def add_watchlist_symbol(self, user_id: str, symbol: str, *, max_items: int = 10) -> tuple[dict[str, Any] | None, str]: ...
     def remove_watchlist_symbol(self, user_id: str, symbol: str) -> tuple[dict[str, Any] | None, bool]: ...
     def update_alert_preferences(self, user_id: str, fields: Mapping[str, bool]) -> dict[str, Any] | None: ...
-    def list_users_for_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]: ...
+    def list_users_for_alerts(self, *, limit: int = 500, after_user_id: str | None = None) -> list[dict[str, Any]]: ...
     def extend_premium_plan(self, user_id: str, days: int, event: Mapping[str, Any], *, now: datetime) -> tuple[dict[str, Any] | None, bool]: ...
     def list_users_for_plan_maintenance(self, *, since: datetime, until: datetime, limit: int = 1000) -> list[dict[str, Any]]: ...
     def claim_plan_notice(self, user_id: str, kind: str, boundary: datetime, *, now: datetime, lease_until: datetime) -> tuple[str, str] | None: ...
@@ -311,17 +313,19 @@ class InMemoryAuthRepository:
             user["alert_prefs_updated_at"] = _now_utc()
             return deepcopy(user)
 
-    def list_users_for_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+    def list_users_for_alerts(self, *, limit: int = 500, after_user_id: str | None = None) -> list[dict[str, Any]]:
+        """Read alert recipients in stable, indexed user-id pages."""
+        page_size = max(1, min(int(limit), 2000))
         with self._lock:
-            selected = []
-            for user in self._users.values():
-                selected.append(deepcopy({key: user.get(key) for key in (
-                    "user_id", "telegram_chat_id", "alert_prefs", "plan", "plan_end",
-                    "trial_end", "banned", "ban_until", "is_admin", "watchlist", "language",
-                )}))
-                if len(selected) >= max(1, min(int(limit), 10000)):
-                    break
-            return selected
+            ordered = sorted(
+                (user for user in self._users.values()
+                 if not after_user_id or str(user.get("user_id") or "") > str(after_user_id)),
+                key=lambda user: str(user.get("user_id") or ""),
+            )
+            return [deepcopy({key: user.get(key) for key in (
+                "user_id", "telegram_chat_id", "alert_prefs", "plan", "plan_end",
+                "trial_end", "banned", "ban_until", "is_admin", "watchlist", "language",
+            )}) for user in ordered[:page_size]]
 
     def create_session(self, session: Mapping[str, Any]) -> None:
         with self._lock:
@@ -471,10 +475,11 @@ class MongoAuthRepository:
         except ImportError as exc:
             raise RuntimeError("Instala pymongo con: pip install 'pymongo>=4.7'") from exc
         timeout = max(1000, int(os.getenv("MONGODB_TIMEOUT_MS", "10000")))
-        client = MongoClient(uri, serverSelectionTimeoutMS=timeout, connectTimeoutMS=timeout, socketTimeoutMS=timeout, retryWrites=True)
+        client = MongoClient(uri, serverSelectionTimeoutMS=timeout, connectTimeoutMS=timeout, socketTimeoutMS=timeout, retryWrites=True, **mongo_pool_options())
         return cls(client=client, db=client[db_name])
 
     def _ensure_indexes(self) -> None:
+        self._users.create_index("user_id", name="users_alerts_pagination")
         self._users.create_index("phone", unique=True, partialFilterExpression={"phone": {"$type": "string"}}, name="uniq_user_phone")
         self._users.create_index("telegram_chat_id", unique=True, partialFilterExpression={"telegram_chat_id": {"$type": "string"}}, name="uniq_user_telegram_chat_id")
         self._users.create_index("ref_code", unique=True, partialFilterExpression={"ref_code": {"$type": "string"}}, name="uniq_user_ref_code")
@@ -678,13 +683,17 @@ class MongoAuthRepository:
             {"user_id": str(user_id)}, {"$set": update}, return_document=ReturnDocument.AFTER,
         ))
 
-    def list_users_for_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+    def list_users_for_alerts(self, *, limit: int = 500, after_user_id: str | None = None) -> list[dict[str, Any]]:
+        """Read alert recipients by indexed cursor instead of loading a fixed first N users."""
         projection = {
             "user_id": 1, "telegram_chat_id": 1, "alert_prefs": 1, "plan": 1,
             "plan_end": 1, "trial_end": 1, "banned": 1, "ban_until": 1,
             "is_admin": 1, "watchlist": 1, "language": 1,
         }
-        cursor = self._users.find({}, projection).limit(max(1, min(int(limit), 10000)))
+        query: dict[str, Any] = {}
+        if after_user_id:
+            query["user_id"] = {"$gt": str(after_user_id)}
+        cursor = self._users.find(query, projection).sort("user_id", 1).limit(max(1, min(int(limit), 2000)))
         return [self._clean(doc) or {} for doc in cursor]
 
     def extend_premium_plan(self, user_id: str, days: int, event: Mapping[str, Any], *, now: datetime) -> tuple[dict[str, Any] | None, bool]:

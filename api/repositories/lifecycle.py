@@ -1,6 +1,8 @@
 """Persistence adapters for signal lifecycle transitions and immutable results."""
 from __future__ import annotations
 
+from api.mongo_config import mongo_pool_options
+
 import os
 import threading
 from datetime import datetime, timezone
@@ -165,7 +167,8 @@ class MongoLifecycleRepository:
             raise RuntimeError("Instala pymongo>=4.7 para persistencia de ciclo de vida") from exc
         timeout_ms = max(1000, int(os.getenv("MONGODB_TIMEOUT_MS", "10000")))
         client = MongoClient(uri, serverSelectionTimeoutMS=timeout_ms,
-                             connectTimeoutMS=timeout_ms, socketTimeoutMS=timeout_ms, retryWrites=True)
+                             connectTimeoutMS=timeout_ms, socketTimeoutMS=timeout_ms, retryWrites=True,
+                             **mongo_pool_options())
         db = client[database_name]
         signal_collection = db[os.getenv("SIGNALS_COLLECTION", "signals")]
         result_collection = db[os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")]

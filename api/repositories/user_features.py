@@ -5,6 +5,8 @@ intended only for unit tests/local development.
 """
 from __future__ import annotations
 
+from api.mongo_config import mongo_pool_options
+
 import os
 import threading
 import uuid
@@ -43,7 +45,7 @@ class UserFeatureRepository(Protocol):
     def create_price_alert(self, document: Mapping[str, Any]) -> dict[str, Any]: ...
     def get_price_alert(self, alert_id: str, user_id: str) -> dict[str, Any] | None: ...
     def list_price_alerts(self, user_id: str, *, enabled_only: bool = False, limit: int = 100) -> list[dict[str, Any]]: ...
-    def list_enabled_price_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]: ...
+    def list_enabled_price_alerts(self, *, limit: int = 500, after_id: str | None = None) -> list[dict[str, Any]]: ...
     def update_price_alert(self, alert_id: str, user_id: str, fields: Mapping[str, Any]) -> dict[str, Any] | None: ...
     def delete_price_alert(self, alert_id: str, user_id: str) -> bool: ...
     def claim_price_alert_trigger(self, alert_id: str, *, now: datetime) -> dict[str, Any] | None: ...
@@ -106,11 +108,13 @@ class InMemoryUserFeatureRepository:
         rows.sort(key=lambda row: _aware(row.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc), reverse=True)
         return rows[:max(1, min(int(limit), 500))]
 
-    def list_enabled_price_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]:
+    def list_enabled_price_alerts(self, *, limit: int = 500, after_id: str | None = None) -> list[dict[str, Any]]:
+        page_size = max(1, min(int(limit), 2000))
         with self._lock:
-            rows = [deepcopy(row) for row in self._alerts.values() if row.get("enabled")]
-        rows.sort(key=lambda row: _aware(row.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc))
-        return rows[:max(1, min(int(limit), 10000))]
+            rows = [deepcopy(row) for row in self._alerts.values()
+                    if row.get("enabled") and (not after_id or str(row.get("id") or "") > str(after_id))]
+        rows.sort(key=lambda row: str(row.get("id") or ""))
+        return rows[:page_size]
 
     def update_price_alert(self, alert_id: str, user_id: str, fields: Mapping[str, Any]) -> dict[str, Any] | None:
         with self._lock:
@@ -433,7 +437,7 @@ class MongoUserFeatureRepository:
             from pymongo import MongoClient
         except ImportError as exc:
             raise RuntimeError("Instala pymongo para usar MongoDB") from exc
-        client = MongoClient(uri, serverSelectionTimeoutMS=3000, connectTimeoutMS=3000)
+        client = MongoClient(uri, serverSelectionTimeoutMS=3000, connectTimeoutMS=3000, **mongo_pool_options())
         return cls(client=client, db=client[database])
 
     def _ensure_indexes(self) -> None:
@@ -452,6 +456,7 @@ class MongoUserFeatureRepository:
         self._push_subscriptions.create_index([("user_id", 1), ("active", 1), ("updated_at", -1)], name="web_push_user_active")
         self._price_alerts.create_index([("id", 1)], unique=True, name="price_alert_id_unique")
         self._price_alerts.create_index([("user_id", 1), ("created_at", -1)], name="price_alert_user_created")
+        self._price_alerts.create_index([("enabled", 1), ("id", 1)], name="price_alert_dispatch_cursor")
         self._price_alerts.create_index([("enabled", 1), ("updated_at", 1)], name="price_alert_dispatch")
         self._price_alerts.create_index([("user_id", 1), ("symbol", 1), ("condition", 1), ("target_price", 1)],
                                         unique=True, partialFilterExpression={"enabled": True}, name="unique_active_price_alert")
@@ -475,8 +480,11 @@ class MongoUserFeatureRepository:
         rows = self._price_alerts.find(query).sort("created_at", -1).limit(max(1, min(int(limit), 500)))
         return [_clean(row) or {} for row in rows]
 
-    def list_enabled_price_alerts(self, *, limit: int = 5000) -> list[dict[str, Any]]:
-        rows = self._price_alerts.find({"enabled": True}).sort("created_at", 1).limit(max(1, min(int(limit), 10000)))
+    def list_enabled_price_alerts(self, *, limit: int = 500, after_id: str | None = None) -> list[dict[str, Any]]:
+        query: dict[str, Any] = {"enabled": True}
+        if after_id:
+            query["id"] = {"$gt": str(after_id)}
+        rows = self._price_alerts.find(query).sort("id", 1).limit(max(1, min(int(limit), 2000)))
         return [_clean(row) or {} for row in rows]
 
     def update_price_alert(self, alert_id: str, user_id: str, fields: Mapping[str, Any]) -> dict[str, Any] | None:
