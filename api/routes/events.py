@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import math
 import os
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.encoders import jsonable_encoder
 from starlette.websockets import WebSocketState
 
+from api.event_hub import EventHub
 from api.security import Principal, current_principal
 from domain.plans import evaluate_access
 from api.services.auth import is_admin_user, is_admin_id
@@ -31,6 +33,15 @@ EVENT_CHANNELS = (
     "market:movers:events:v1",
     "billing:events:v1",
 )
+# The account row is re-read from Mongo at most this often per connection (and
+# immediately after an account/billing/notification event for that user). Access is
+# re-evaluated against the cached row on EVERY event, so trial/plan expiry is exact.
+ACCESS_RECHECK_SECONDS = 15.0
+# One liquidation summary frame per connection every few seconds is enough: the
+# summary covers a 15-minute window and the page also refreshes by REST.
+LIQUIDATION_FRAME_MIN_INTERVAL = 3.0
+SIGNAL_MEMO_SECONDS = 5.0
+_signal_memo: dict[str, tuple[float, asyncio.AbstractEventLoop, asyncio.Future]] = {}
 
 
 def _ticket_key(ticket: str) -> str:
@@ -94,6 +105,36 @@ async def _find_signal(request: Request, signal_id: str) -> dict[str, Any] | Non
     return None
 
 
+async def _load_signal_shared(request: Request, signal_id: str, event_key: Any) -> dict[str, Any] | None:
+    """Resolve a signal once per distinct event and share it between all clients.
+
+    Every connected browser used to run its own `list_signals(limit=2000)` query for
+    the same event. The first connection performs the lookup; the rest await the same
+    future. Each caller gets a shallow copy because frames add top-level keys.
+    """
+    key = f"{signal_id}|{json.dumps(event_key, sort_keys=True, default=str)}"
+    now = time.monotonic()
+    loop = asyncio.get_running_loop()
+    for stale in [k for k, (stamp, _l, _f) in _signal_memo.items() if now - stamp > SIGNAL_MEMO_SECONDS]:
+        _signal_memo.pop(stale, None)
+    entry = _signal_memo.get(key)
+    if entry is not None and entry[1] is loop:
+        result = await entry[2]
+        return dict(result) if isinstance(result, dict) else None
+    future: asyncio.Future = loop.create_future()
+    _signal_memo[key] = (now, loop, future)
+    result: dict[str, Any] | None = None
+    try:
+        result = await _find_signal(request, signal_id)
+    finally:
+        if result is None:
+            # Do not memoize failures/misses: the next event retries the lookup.
+            _signal_memo.pop(key, None)
+        # Always resolve the future so waiting clients never hang (None on failure).
+        future.set_result(result)
+    return dict(result) if isinstance(result, dict) else None
+
+
 @router.post("/events/ticket")
 async def create_websocket_ticket(request: Request, principal: Principal = Depends(current_principal)) -> dict[str, Any]:
     """Exchange a normal bearer-authenticated request for a 60-second single-use WS ticket.
@@ -115,7 +156,8 @@ async def create_websocket_ticket(request: Request, principal: Principal = Depen
 
 
 async def _event_frames(request: Request, source: str, value: Any, user_id: str,
-                        can_view_market: bool, last_ticks: dict[str, float]) -> list[dict[str, Any]]:
+                        can_view_market: bool, last_ticks: dict[str, Any],
+                        batch: bool = False) -> list[dict[str, Any]]:
     now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     if not isinstance(value, dict):
         return []
@@ -123,7 +165,7 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
     if source == "signals:new:v1":
         if not can_view_market:
             return []
-        full = await _find_signal(request, str(value.get("id") or ""))
+        full = await _load_signal_shared(request, str(value.get("id") or ""), ("new", value))
         if not full:
             # Avoid violating the contract by publishing a partial signal payload.
             return []
@@ -134,7 +176,7 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
         if not can_view_market:
             return []
         signal_id = str(value.get("signal_id") or "")
-        full = await _find_signal(request, signal_id)
+        full = await _load_signal_shared(request, signal_id, ("event", value))
         if not full:
             return []
         raw_type = str(value.get("type") or "")
@@ -170,6 +212,28 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
             return []
         event = str(value.get("event") or "")
         payload = value.get("payload")
+        if event == "price.update" and isinstance(payload, list) and batch:
+            # One frame per snapshot instead of one frame per symbol, and symbols whose
+            # visible fields did not change since the last frame sent to this client
+            # are skipped. This removes ~400 websocket sends/s per browser.
+            rows = []
+            for row in payload:
+                if not isinstance(row, dict) or not row.get("symbol"):
+                    continue
+                symbol = str(row["symbol"]).upper()
+                signature = (row.get("price"), row.get("change_pct"), row.get("volume_24h"),
+                             row.get("high_24h"), row.get("low_24h"))
+                if last_ticks.get(symbol) == signature:
+                    continue
+                last_ticks[symbol] = signature
+                rows.append({
+                    "symbol": symbol, "price": row.get("price"), "change_pct": row.get("change_pct"),
+                    "volume_24h": row.get("volume_24h"), "high_24h": row.get("high_24h"),
+                    "low_24h": row.get("low_24h"),
+                })
+            if not rows:
+                return []
+            return [{"channel": "prices", "event": "tick.batch", "payload": rows, "ts": value.get("ts") or now_iso}]
         if event == "price.update" and isinstance(payload, list):
             frames = []
             now = time.monotonic()
@@ -207,6 +271,10 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
                 }, "ts": value.get("ts") or now_iso})
             return frames
         if event == "liquidation.new":
+            now_mono = time.monotonic()
+            if now_mono - float(last_ticks.get("__liquidation_frame__", 0.0) or 0.0) < LIQUIDATION_FRAME_MIN_INTERVAL:
+                return []
+            last_ticks["__liquidation_frame__"] = now_mono
             try:
                 summary = await request.app.state.market_intelligence_service.liquidations(15)
             except Exception:
@@ -257,7 +325,11 @@ async def _event_frames(request: Request, source: str, value: Any, user_id: str,
 
 
 @router.websocket("/ws/events")
-async def websocket_events(websocket: WebSocket, ticket: str = Query(default="", min_length=16, max_length=128)) -> None:
+async def websocket_events(
+    websocket: WebSocket,
+    ticket: str = Query(default="", min_length=16, max_length=128),
+    batch: int = Query(default=0, ge=0, le=1),
+) -> None:
     await websocket.accept()
     request = websocket  # exposes app.state while keeping the transformer typed simply
     cache = websocket.app.state.market_cache
@@ -291,7 +363,12 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
     access = evaluate_access(user, now=datetime.now(timezone.utc), is_admin=admin)
     can_view_market = bool(access.get("allowed"))
     queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=500)
-    tasks: list[asyncio.Task] = []
+    receiver_task: asyncio.Task | None = None
+    access_user: Mapping[str, Any] = user
+    access_checked_at = time.monotonic()
+    prices_enabled = True
+    use_batch = bool(batch)
+    last_ticks: dict[str, Any] = {}
 
     def enqueue_event(channel: str, item: Any) -> None:
         """Keep market prices latest-wins so a slow client does not replay stale ticks."""
@@ -300,6 +377,8 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
             and isinstance(item, dict)
             and item.get("event") == "price.update"
         )
+        if is_price_snapshot and not prices_enabled:
+            return  # tab hidden: the browser asked to pause the heavy price stream
         if is_price_snapshot:
             # A price.update contains a whole snapshot of changed symbols. If an older
             # snapshot is still waiting, replace it instead of building a stale backlog.
@@ -317,6 +396,15 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
                 )
                 if not old_is_price_snapshot:
                     pending.append(queued)
+                elif use_batch:
+                    # Batched frames dedupe against what was last SENT, so merge the
+                    # replaced snapshot into the new one instead of losing its symbols.
+                    old_rows = old_item.get("payload") if isinstance(old_item, dict) else None
+                    new_rows = item.get("payload") if isinstance(item, dict) else None
+                    if isinstance(old_rows, list) and isinstance(new_rows, list):
+                        newest = {str(r.get("symbol")): r for r in new_rows if isinstance(r, dict)}
+                        merged_rows = [r for r in old_rows if isinstance(r, dict) and str(r.get("symbol")) not in newest]
+                        item = {**item, "payload": merged_rows + list(newest.values())}
             for queued in pending:
                 queue.put_nowait(queued)
 
@@ -340,14 +428,52 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
             # change the queue between the fullness check and put_nowait.
             logger.warning("Se descartó un evento WebSocket porque la cola está llena (%s)", channel)
 
-    async def pump(channel: str) -> None:
-        async for item in cache.subscribe_json(channel):
-            enqueue_event(channel, item)
+    async def receive_controls() -> None:
+        """Read small control messages and detect a closed socket immediately.
+
+        `{"op":"prices","enabled":false}` pauses price/funding frames (hidden tab);
+        signals, alerts and account events keep flowing. Re-enabling resets the
+        per-client dedupe so the next snapshot carries every changed symbol again.
+        """
+        nonlocal prices_enabled
+        try:
+            while True:
+                message = await websocket.receive()
+                if message.get("type") == "websocket.disconnect":
+                    break
+                text = message.get("text")
+                if not isinstance(text, str) or len(text) > 512:
+                    continue
+                try:
+                    control = json.loads(text)
+                except ValueError:
+                    continue
+                if isinstance(control, dict) and control.get("op") == "prices":
+                    enabled = bool(control.get("enabled", True))
+                    if enabled and not prices_enabled:
+                        last_ticks.clear()
+                    prices_enabled = enabled
+        except (WebSocketDisconnect, RuntimeError, OSError):
+            pass
+        finally:
+            while True:
+                try:
+                    queue.put_nowait(("__closed__", None))
+                    break
+                except asyncio.QueueFull:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+
+    hub: EventHub | None = getattr(websocket.app.state, "event_hub", None)
+    if hub is None or getattr(hub, "_cache", None) is not cache:
+        hub = EventHub(cache, EVENT_CHANNELS)
+        websocket.app.state.event_hub = hub
 
     try:
-        for channel in EVENT_CHANNELS:
-            tasks.append(asyncio.create_task(pump(channel), name=f"ws-sub-{channel}"))
-        last_ticks: dict[str, float] = {}
+        hub.add(enqueue_event)
+        receiver_task = asyncio.create_task(receive_controls(), name="ws-controls")
         while True:
             try:
                 source, item = await asyncio.wait_for(queue.get(), timeout=25.0)
@@ -361,16 +487,39 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
                 if not await _try_send_websocket_json(websocket, heartbeat):
                     return
                 continue
+            if source == "__closed__":
+                return
+
+            is_price_source = (
+                source == "market:events"
+                and isinstance(item, dict)
+                and item.get("event") in {"price.update", "funding.update"}
+            )
+            if is_price_source and not prices_enabled:
+                continue
+            own_account_event = (
+                source in {"account:events:v1", "billing:events:v1", "notifications:events:v1"}
+                and isinstance(item, dict)
+                and str(item.get("user_id") or "") == user_id
+            )
 
             # Re-check current account restrictions at event time; a ban/expiry takes
-            # effect without waiting for the short-lived WS ticket to expire.
+            # effect without waiting for the short-lived WS ticket to expire. The
+            # account row is cached per connection (see ACCESS_RECHECK_SECONDS) but
+            # the entitlement is recomputed from it for every event.
             try:
-                current_user = await asyncio.to_thread(auth_repo.get_user_by_id, user_id)
-                if not current_user:
-                    await websocket.close(code=4401, reason="Cuenta inexistente")
-                    return
-                can_view_market = bool(evaluate_access(current_user, now=datetime.now(timezone.utc), is_admin=_is_admin(user_id, current_user)).get("allowed"))
-                frames = await _event_frames(websocket, source, item, user_id, can_view_market, last_ticks)
+                if own_account_event or time.monotonic() - access_checked_at >= ACCESS_RECHECK_SECONDS:
+                    current_user = await asyncio.to_thread(auth_repo.get_user_by_id, user_id)
+                    if not current_user:
+                        await websocket.close(code=4401, reason="Cuenta inexistente")
+                        return
+                    access_user = current_user
+                    access_checked_at = time.monotonic()
+                can_view_market = bool(evaluate_access(access_user, now=datetime.now(timezone.utc), is_admin=_is_admin(user_id, access_user)).get("allowed"))
+                if use_batch:
+                    frames = await _event_frames(websocket, source, item, user_id, can_view_market, last_ticks, batch=True)
+                else:
+                    frames = await _event_frames(websocket, source, item, user_id, can_view_market, last_ticks)
             except Exception:
                 # A malformed/unavailable event is isolated; the live connection can
                 # still receive subsequent valid events. Transport errors are handled
@@ -394,7 +543,7 @@ async def websocket_events(websocket: WebSocket, ticket: str = Query(default="",
             except (RuntimeError, OSError, WebSocketDisconnect):
                 pass
     finally:
-        for task in tasks:
-            task.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
+        if receiver_task is not None:
+            receiver_task.cancel()
+            await asyncio.gather(receiver_task, return_exceptions=True)
+        await hub.release(enqueue_event)
