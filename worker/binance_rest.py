@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -21,19 +24,46 @@ class BinanceInvalidSymbolError(BinanceDataError):
 class BinanceRestClient:
     def __init__(self, *, base_url: str = "https://fapi.binance.com", timeout_seconds: float = 8.0,
                  retries: int = 3, client: httpx.AsyncClient | None = None,
+                 max_connections: int | None = None, concurrency: int | None = None,
                  sleep=asyncio.sleep) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.retries = max(1, min(int(retries), 5))
+        try:
+            env_connections = int(os.getenv("BINANCE_REST_MAX_CONNECTIONS", "8"))
+            env_concurrency = int(os.getenv("BINANCE_REST_CONCURRENCY", "4"))
+        except (TypeError, ValueError):
+            env_connections, env_concurrency = 8, 4
+        self.max_connections = max(2, min(32, int(max_connections if max_connections is not None else env_connections)))
+        self.concurrency = max(1, min(self.max_connections, int(concurrency if concurrency is not None else env_concurrency)))
         self._client = client or httpx.AsyncClient(
             base_url=self.base_url,
             timeout=httpx.Timeout(timeout_seconds, connect=min(3.0, timeout_seconds)),
-            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            limits=httpx.Limits(
+                max_connections=self.max_connections,
+                max_keepalive_connections=max(1, min(self.max_connections, self.max_connections // 2)),
+            ),
             headers={"User-Agent": "FTrade-Web/0.4"},
         )
         self._owns_client = client is None
-        self._semaphore = asyncio.Semaphore(4)
+        self._semaphore = asyncio.Semaphore(self.concurrency)
         self._sleep = sleep
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        raw = response.headers.get("Retry-After")
+        if not raw:
+            return None
+        try:
+            return max(0.0, min(60.0, float(raw)))
+        except (TypeError, ValueError):
+            try:
+                parsed = parsedate_to_datetime(raw)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                return max(0.0, min(60.0, (parsed - datetime.now(timezone.utc)).total_seconds()))
+            except (TypeError, ValueError, OverflowError):
+                return None
 
     async def _get_json(self, path: str, params: dict[str, Any] | None = None) -> Any:
         last_error: Exception | None = None
@@ -54,13 +84,18 @@ class BinanceRestClient:
                     raise
                 except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError, ValueError) as exc:
                     last_error = exc
-                    # Do not retry ordinary client errors; do retry timeouts, 429s and 5xx.
+                    retry_after = None
+                    # Do not retry ordinary client errors. On Binance 418/429 honor
+                    # Retry-After so a throttled client does not intensify the ban.
                     if isinstance(exc, httpx.HTTPStatusError):
                         status = exc.response.status_code
                         if status not in (418, 429) and status < 500:
                             break
+                        if status in (418, 429):
+                            retry_after = self._retry_after_seconds(exc.response)
                     if attempt + 1 < self.retries:
-                        await self._sleep(min(0.25 * (2 ** attempt), 1.5))
+                        backoff = min(0.25 * (2 ** attempt), 1.5)
+                        await self._sleep(max(backoff, retry_after or 0.0))
             logger.warning("Binance REST %s falló: %s", path, last_error)
         raise BinanceDataError(f"No se pudo obtener {path} de Binance") from last_error
 

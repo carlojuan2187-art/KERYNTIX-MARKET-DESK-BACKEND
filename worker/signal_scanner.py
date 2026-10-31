@@ -334,11 +334,22 @@ class SignalScanner:
                 )
                 return symbol, result, debug_counts, found_observations
 
-        tasks = [asyncio.create_task(analyze(symbol)) for symbol in symbols]
-        try:
-            for task in asyncio.as_completed(tasks):
+        # Keep task count bounded by configured concurrency. The previous
+        # implementation created one Task per listed symbol (hundreds on a full
+        # Futures scan) and only then gated requests with a semaphore.
+        symbol_queue: asyncio.Queue[str] = asyncio.Queue()
+        for symbol in symbols:
+            symbol_queue.put_nowait(symbol)
+
+        async def analyze_worker() -> None:
+            nonlocal symbol_errors
+            while True:
                 try:
-                    symbol, results, debug, discovered = await task
+                    symbol = symbol_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    symbol, results, debug, discovered = await analyze(symbol)
                     observations.extend(discovered)
                     for reason, count in debug.items():
                         rejects[reason] = rejects.get(reason, 0) + int(count)
@@ -350,11 +361,20 @@ class SignalScanner:
                 except Exception as exc:
                     symbol_errors += 1
                     logger.warning("Error analizando símbolo durante el scan (%s)", type(exc).__name__)
+                finally:
+                    symbol_queue.task_done()
+
+        worker_tasks = [
+            asyncio.create_task(analyze_worker(), name=f"signal-scan-worker-{index + 1}")
+            for index in range(min(self.concurrency, len(symbols)))
+        ]
+        try:
+            await asyncio.gather(*worker_tasks)
         finally:
-            for task in tasks:
+            for task in worker_tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
 
         try:
             sweeps_saved = self.sweep_store.save_observations(observations)
@@ -420,6 +440,7 @@ class SignalScanner:
             "status": "ok" if symbol_errors == 0 else "degraded",
             "started_at": now.isoformat(),
             "symbols_seen": len(symbols),
+            "analysis_workers": min(self.concurrency, len(symbols)),
             "symbols_with_errors": symbol_errors,
             "candidates": len(candidates),
             "candidates_prechecked": attempted_candidates,

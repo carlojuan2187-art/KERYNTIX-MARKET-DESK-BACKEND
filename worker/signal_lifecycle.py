@@ -45,6 +45,7 @@ MARKET_PRICE_MAX_AGE_SECONDS = max(3, int(os.getenv("MARKET_PRICE_MAX_AGE_SECOND
 REST_PRICE_REFRESH_SECONDS = max(5, int(os.getenv("LIFECYCLE_REST_PRICE_REFRESH_SECONDS", "10")))
 MAX_PENDING_SIGNALS = max(10, min(5000, int(os.getenv("LIFECYCLE_MAX_PENDING_SIGNALS", "2000"))))
 MAX_OPEN_TRADES = max(10, min(5000, int(os.getenv("LIFECYCLE_MAX_OPEN_TRADES", "2000"))))
+LIFECYCLE_REST_CONCURRENCY = max(1, min(12, int(os.getenv("LIFECYCLE_REST_CONCURRENCY", "4"))))
 LIFECYCLE_STATUS_KEY = "signal-lifecycle:status:v1"
 SIGNAL_EVENTS_CHANNEL = "signals:events:v1"
 
@@ -263,59 +264,136 @@ class SignalLifecycleWorker:
         unique = {candle["open_time"]: candle for candle in candles}
         return sorted(unique.values(), key=lambda candle: candle["open_time"])
 
+    async def _fetch_candles_for_group(self, symbol: str, start_at: datetime, end_at: datetime) -> list[dict[str, Any]]:
+        """Fetch a shared symbol history in bounded windows without starving recent trades.
+
+        Binance caps each kline page at 1,000 rows and this worker caps pages per
+        request range. Splitting long histories into consecutive windows preserves
+        coverage for newer signals even when another signal on the same symbol is
+        much older. Overlapping boundary candles are deduplicated by open_time.
+        """
+        start = utc_naive(start_at) or datetime.utcnow()
+        end = utc_naive(end_at) or datetime.utcnow()
+        if end <= start:
+            return []
+        window_minutes = max(900, OUTCOME_MAX_PAGES * 900)
+        window = timedelta(minutes=window_minutes)
+        all_candles: list[dict[str, Any]] = []
+        cursor = start
+        while cursor < end:
+            window_end = min(end, cursor + window)
+            rows = await self._fetch_candles_since(symbol, cursor, window_end)
+            all_candles.extend(rows)
+            if window_end >= end:
+                break
+            # Inclusive Binance time bounds may repeat the edge candle. This is
+            # intentional; the final open_time dedupe prevents gaps at boundaries.
+            cursor = window_end
+        unique = {candle["open_time"]: candle for candle in all_candles if candle.get("open_time") is not None}
+        return sorted(unique.values(), key=lambda candle: candle["open_time"])
+
     async def track_open_trades_once(self, *, now: datetime | None = None, force: bool = False) -> int:
         current_time = utc_naive(now or self.clock()) or datetime.utcnow()
         if not force and self._last_outcome_scan is not None and (current_time - self._last_outcome_scan).total_seconds() < self.outcome_check_seconds:
             return 0
         self._last_outcome_scan = current_time
         open_signals = list(self.repository.list_open(limit=self.max_open))
-        changed = 0
+
+        # Several signals can be open on the same pair. Fetch closed 1m candles once
+        # per symbol (from the oldest untracked time), then let advance_trade apply
+        # each signal's own tracked_until/touched_at gates. This preserves trade
+        # semantics while avoiding one identical Binance REST request per signal.
+        grouped: dict[str, list[tuple[Mapping[str, Any], datetime]]] = {}
         for signal in open_signals:
-            try:
-                outcome_before = dict(signal.get("outcome") or {})
-                previous_tracked = utc_naive(outcome_before.get("tracked_until")) or utc_naive(signal.get("touched_at"))
-                if previous_tracked is None or (current_time - previous_tracked).total_seconds() < 61:
-                    continue
-                symbol = str(signal.get("symbol") or "").upper()
+            outcome_before = dict(signal.get("outcome") or {})
+            previous_tracked = utc_naive(outcome_before.get("tracked_until")) or utc_naive(signal.get("touched_at"))
+            if previous_tracked is None or (current_time - previous_tracked).total_seconds() < 61:
+                continue
+            symbol = str(signal.get("symbol") or "").upper()
+            if not symbol:
+                continue
+            grouped.setdefault(symbol, []).append((signal, previous_tracked))
+
+        symbols = list(grouped)
+        candle_results: dict[str, list[dict[str, Any]]] = {}
+        errors: dict[str, str] = {}
+        queue: asyncio.Queue[str] = asyncio.Queue()
+        for symbol in symbols:
+            queue.put_nowait(symbol)
+
+        async def fetch_worker() -> None:
+            while True:
                 try:
-                    candles = await self._fetch_candles_since(symbol, previous_tracked + timedelta(milliseconds=1), current_time)
+                    symbol = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+                try:
+                    earliest = min(previous for _signal, previous in grouped[symbol])
+                    candle_results[symbol] = await self._fetch_candles_for_group(
+                        symbol, earliest + timedelta(milliseconds=1), current_time,
+                    )
+                except asyncio.CancelledError:
+                    raise
                 except Exception as exc:
+                    errors[symbol] = type(exc).__name__
                     logger.warning("Tracker: error consultando %s (%s)", symbol, type(exc).__name__)
-                    continue
-                if not candles:
-                    continue
-                step = advance_trade(dict(signal), candles, now=current_time)
-                if not step["advanced"]:
-                    continue
-                new_outcome = dict(step["outcome"])
-                closed = step["closed"]
-                levels = step["levels"]
-                if new_outcome.get("state") == STATE_CLOSED and closed is not None and levels is not None:
-                    result_doc = build_result_doc(dict(signal), levels, closed)
-                    # Canonical web IDs are stable UUIDs; the tracker supports older records too.
-                    self.repository.save_result_if_absent(result_doc)
-                    new_outcome["r_real"] = closed.get("r_real")
-                expected_tracked = outcome_before.get("tracked_until") if "tracked_until" in outcome_before else previous_tracked
-                updated = self.repository.compare_and_set_outcome(signal, expected_tracked, new_outcome)
-                if not updated:
-                    continue
-                event_count = len(step.get("events") or [])
-                for event in step.get("events") or []:
-                    await self._publish({
-                        "type": "signal.outcome.updated",
-                        "signal_id": _signal_id(signal), "symbol": symbol,
-                        "direction": signal.get("direction"),
-                        "event_type": event.get("type"), "result": event.get("result"),
-                        "r": event.get("r"), "r_tp1": event.get("r_tp1"),
-                        "ambiguous": event.get("ambiguous", False),
-                        "event_at": _iso_utc(event.get("at") or current_time),
-                    })
-                if new_outcome.get("state") == STATE_CLOSED and new_outcome.get("result") == RESULT_INVALID:
-                    logger.warning("Señal %s cerrada INVALID por geometría inutilizable", _signal_id(signal))
-                if event_count or new_outcome.get("state") == STATE_CLOSED:
-                    changed += 1
-            except Exception:
-                logger.exception("Tracker: error procesando señal %s", _signal_id(signal))
+                finally:
+                    queue.task_done()
+
+        fetch_tasks = [
+            asyncio.create_task(fetch_worker(), name=f"lifecycle-fetch-{index + 1}")
+            for index in range(min(LIFECYCLE_REST_CONCURRENCY, len(symbols)))
+        ]
+        try:
+            await asyncio.gather(*fetch_tasks)
+        finally:
+            for task in fetch_tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*fetch_tasks, return_exceptions=True)
+
+        changed = 0
+        for symbol, signals in grouped.items():
+            if symbol in errors:
+                continue
+            candles = candle_results.get(symbol, [])
+            if not candles:
+                continue
+            for signal, _previous_tracked in signals:
+                try:
+                    outcome_before = dict(signal.get("outcome") or {})
+                    step = advance_trade(dict(signal), candles, now=current_time)
+                    if not step["advanced"]:
+                        continue
+                    new_outcome = dict(step["outcome"])
+                    closed = step["closed"]
+                    levels = step["levels"]
+                    if new_outcome.get("state") == STATE_CLOSED and closed is not None and levels is not None:
+                        result_doc = build_result_doc(dict(signal), levels, closed)
+                        # Canonical web IDs are stable UUIDs; the tracker supports older records too.
+                        self.repository.save_result_if_absent(result_doc)
+                        new_outcome["r_real"] = closed.get("r_real")
+                    expected_tracked = outcome_before.get("tracked_until") if "tracked_until" in outcome_before else utc_naive(signal.get("touched_at"))
+                    updated = self.repository.compare_and_set_outcome(signal, expected_tracked, new_outcome)
+                    if not updated:
+                        continue
+                    event_count = len(step.get("events") or [])
+                    for event in step.get("events") or []:
+                        await self._publish({
+                            "type": "signal.outcome.updated",
+                            "signal_id": _signal_id(signal), "symbol": symbol,
+                            "direction": signal.get("direction"),
+                            "event_type": event.get("type"), "result": event.get("result"),
+                            "r": event.get("r"), "r_tp1": event.get("r_tp1"),
+                            "ambiguous": event.get("ambiguous", False),
+                            "event_at": _iso_utc(event.get("at") or current_time),
+                        })
+                    if new_outcome.get("state") == STATE_CLOSED and new_outcome.get("result") == RESULT_INVALID:
+                        logger.warning("Señal %s cerrada INVALID por geometría inutilizable", _signal_id(signal))
+                    if event_count or new_outcome.get("state") == STATE_CLOSED:
+                        changed += 1
+                except Exception:
+                    logger.exception("Tracker: error procesando señal %s", _signal_id(signal))
         return changed
 
     async def run_once(self) -> dict[str, Any]:

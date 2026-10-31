@@ -49,10 +49,45 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _env_int(name: str, default: int, *, low: int, high: int) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(low, min(high, value))
+
+
+async def _run_bounded(items: list[Any], handler: Any, *, concurrency: int) -> list[Any]:
+    """Process a bounded batch without creating one asyncio task per item."""
+    if not items:
+        return []
+    iterator = iter(items)
+    results: list[Any] = []
+
+    async def runner() -> None:
+        while True:
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+            try:
+                results.append(await handler(item))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # The caller decides how to log/count failures.
+                results.append(exc)
+
+    workers = min(max(1, int(concurrency)), len(items))
+    tasks = [asyncio.create_task(runner(), name="user-alert-batch") for _ in range(workers)]
+    await asyncio.gather(*tasks)
+    return results
+
+
 class UserAlertProcessor:
     def __init__(self, auth_repository: AuthRepository, feature_repository: UserFeatureRepository,
                  cache: JsonCache, telegram_gateway: Any | None = None, *, clock=time.time,
-                 max_telegram_per_cycle: int = 20, market_intelligence: Any | None = None) -> None:
+                 max_telegram_per_cycle: int = 20, market_intelligence: Any | None = None,
+                 page_size: int | None = None, notify_concurrency: int | None = None) -> None:
         self.auth = auth_repository
         self.features = feature_repository
         self.cache = cache
@@ -60,6 +95,8 @@ class UserAlertProcessor:
         self.clock = clock
         self.max_telegram_per_cycle = max(0, min(100, int(max_telegram_per_cycle)))
         self.market_intelligence = market_intelligence
+        self.page_size = max(50, min(2000, int(page_size if page_size is not None else _env_int("ALERT_DISPATCH_PAGE_SIZE", 500, low=50, high=2000))))
+        self.notify_concurrency = max(1, min(32, int(notify_concurrency if notify_concurrency is not None else _env_int("ALERT_DISPATCH_CONCURRENCY", 12, low=1, high=32))))
         self._telegram_sent = 0
 
     async def _refresh_global_alert_snapshots(self) -> None:
@@ -101,42 +138,50 @@ class UserAlertProcessor:
             except Exception as exc:
                 logger.warning("No se pudo publicar snapshot de movers (%s): %s", name, type(exc).__name__)
 
+    async def _next_user_page(self, after_user_id: str | None) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self.auth.list_users_for_alerts, limit=self.page_size, after_user_id=after_user_id,
+        )
+
+    async def _next_price_alert_page(self, after_id: str | None) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self.features.list_enabled_price_alerts, limit=self.page_size, after_id=after_id,
+        )
+
     async def run_once(self) -> dict[str, int]:
         await self._refresh_global_alert_snapshots()
         now_epoch = float(self.clock())
         now = datetime.fromtimestamp(now_epoch, tz=timezone.utc)
         self._telegram_sent = 0
-        users = await asyncio.to_thread(self.auth.list_users_for_alerts, limit=5000)
         created = 0
         price_triggered = 0
         market_candidates = 0
         telegram_queued = 0
+        users_scanned = 0
         quotes = await self.cache.get_json(QUOTES_KEY)
         quote_map = quotes if isinstance(quotes, dict) else {}
 
-        # Personal price alerts are one-shot by default; repeat alerts obey their cooldown.
-        for alert in await asyncio.to_thread(self.features.list_enabled_price_alerts, limit=5000):
+        async def process_price_alert(alert: Mapping[str, Any]) -> tuple[int, int]:
             symbol = str(alert.get("symbol") or "").upper()
             quote = quote_map.get(symbol) if isinstance(quote_map, dict) else None
             price = _num(quote.get("price")) if isinstance(quote, dict) else None
             target = _num(alert.get("target_price"))
             if price is None or target is None or price <= 0:
-                continue
+                return 0, 0
             condition = str(alert.get("condition") or "")
             triggered = price >= target if condition == "above" else price <= target if condition == "below" else False
             if not triggered:
-                continue
+                return 0, 0
             user_id = str(alert.get("user_id") or "")
             user = await asyncio.to_thread(self.auth.get_user_by_id, user_id)
             if not user or not self._user_allowed(user, now):
-                continue
+                return 0, 0
             prefs = alert_preferences(user)
             if not (prefs.get("on") and prefs.get("price") and (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push"))):
-                continue
+                return 0, 0
             claimed = await asyncio.to_thread(self.features.claim_price_alert_trigger, str(alert.get("id")), now=now)
             if not claimed:
-                continue
-            price_triggered += 1
+                return 0, 0
             target_text = f"{target:,.8g}"
             current_text = f"{price:,.8g}"
             direction_text = "alcanzó o superó" if condition == "above" else "alcanzó o cayó por debajo de"
@@ -147,31 +192,85 @@ class UserAlertProcessor:
                 symbol=symbol, metadata={"alert_id": alert.get("id"), "condition": condition,
                                          "target_price": target, "observed_price": price}, now=now,
             )
-            created += int(made)
-            telegram_queued += int(queued_telegram)
+            return int(made), int(queued_telegram)
 
-        # The detector ports the bot's thresholds: complete windows, exact volume
-        # confirmation, persisted per-key cooldown/escalation and long/short semantics.
+        # Cursor pagination prevents the old hard 5,000-alert ceiling and avoids
+        # loading every enabled price alert into memory in one cycle.
+        after_alert_id: str | None = None
+        while True:
+            try:
+                alert_page = await self._next_price_alert_page(after_alert_id)
+            except Exception:
+                logger.exception("No se pudo cargar una página de alertas de precio")
+                break
+            if not alert_page:
+                break
+            outcomes = await _run_bounded(alert_page, process_price_alert, concurrency=self.notify_concurrency)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    logger.warning("Error procesando alerta de precio (%s)", type(outcome).__name__)
+                    continue
+                made, queued = outcome
+                created += made
+                price_triggered += made
+                telegram_queued += queued
+            next_id = str(alert_page[-1].get("id") or "")
+            if not next_id or next_id == after_alert_id or len(alert_page) < self.page_size:
+                break
+            after_alert_id = next_id
+
+        # Evaluate market conditions once; distribute each candidate across all
+        # user pages. No account after the previous 5,000-user cutoff is skipped.
         candidates = await self._global_market_candidates(now_epoch)
         candidates = await self._filter_global_market_candidates(candidates, now_epoch)
         market_candidates = len(candidates)
-        for candidate in candidates:
-            for user in users:
-                if not self._user_allowed(user, now) or not wants_alert(user, candidate["kind"]):
-                    continue
-                prefs = alert_preferences(user)
-                if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
-                    continue
-                made, queued_telegram = await self._notify_user(
-                    user, event_id=candidate["event_id"], kind=candidate["kind"],
-                    title=candidate["title"], message=candidate["message"], symbol=candidate.get("symbol"),
-                    metadata=candidate.get("metadata") or {}, now=now,
-                )
-                created += int(made)
-                telegram_queued += int(queued_telegram)
+        if candidates:
+            after_user_id: str | None = None
+            while True:
+                try:
+                    users = await self._next_user_page(after_user_id)
+                except Exception:
+                    logger.exception("No se pudo cargar una página de usuarios para avisos globales")
+                    break
+                if not users:
+                    break
+                users_scanned += len(users)
+
+                async def process_market_user(user: Mapping[str, Any]) -> tuple[int, int]:
+                    if not self._user_allowed(user, now):
+                        return 0, 0
+                    prefs = alert_preferences(user)
+                    if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
+                        return 0, 0
+                    user_created = 0
+                    user_telegram = 0
+                    for candidate in candidates:
+                        if not wants_alert(user, candidate["kind"]):
+                            continue
+                        made, queued = await self._notify_user(
+                            user, event_id=candidate["event_id"], kind=candidate["kind"],
+                            title=candidate["title"], message=candidate["message"], symbol=candidate.get("symbol"),
+                            metadata=candidate.get("metadata") or {}, now=now,
+                        )
+                        user_created += int(made)
+                        user_telegram += int(queued)
+                    return user_created, user_telegram
+
+                outcomes = await _run_bounded(users, process_market_user, concurrency=self.notify_concurrency)
+                for outcome in outcomes:
+                    if isinstance(outcome, Exception):
+                        logger.warning("Error distribuyendo alerta global (%s)", type(outcome).__name__)
+                        continue
+                    made, queued = outcome
+                    created += made
+                    telegram_queued += queued
+                next_user_id = str(users[-1].get("user_id") or "")
+                if not next_user_id or next_user_id == after_user_id or len(users) < self.page_size:
+                    break
+                after_user_id = next_user_id
 
         status = {"status": "ok", "checked_at": now.isoformat().replace("+00:00", "Z"),
-                  "users_scanned": len(users), "price_alerts_triggered": price_triggered,
+                  "users_scanned": users_scanned, "price_alerts_triggered": price_triggered,
                   "market_candidates": market_candidates, "notifications_created": created,
                   "telegram_queued": telegram_queued, "telegram_sent": 0}
         try:
@@ -204,12 +303,6 @@ class UserAlertProcessor:
         if not signal_id or not symbol or direction not in {"LONG", "SHORT"}:
             return {"users_scanned": 0, "notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
 
-        try:
-            users = await asyncio.to_thread(self.auth.list_users_for_alerts, limit=5000)
-        except Exception:
-            logger.exception("No se pudo obtener la lista de usuarios para notificar una señal")
-            return {"users_scanned": 0, "notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
-
         entry = signal.get("entry_price")
         stop = signal.get("stop_loss")
         targets = signal.get("take_profits") if isinstance(signal.get("take_profits"), list) else []
@@ -238,35 +331,61 @@ class UserAlertProcessor:
             "score": score,
         }
 
-        counts = {"users_scanned": len(users), "notifications_created": 0,
+        counts = {"users_scanned": 0, "notifications_created": 0,
                   "telegram_queued": 0, "web_push_queued": 0}
-        for user in users:
-            user_id = str(user.get("user_id") or "")
-            admin = is_admin_user(user)
-            access = evaluate_access(user, now=current, is_admin=admin)
-            if not user_id or not access.get("allowed") or not wants_alert(user, "signals"):
-                continue
-            # A live five-day trial has the same feature entitlement as Premium.
-            # Premium-only signals must therefore reach paid Premium, trial, and
-            # administrator accounts, but never expired/free accounts.
-            if visibility not in {"free", "public"} and not (
-                admin or access.get("premium_active") or access.get("trial_active")
-            ):
-                continue
-            prefs = alert_preferences(user)
-            if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
-                continue
+        after_user_id: str | None = None
+        while True:
             try:
-                made, telegram_queued = await self._notify_user(
-                    user, event_id=event_id, kind="signals", title=title, message=message,
-                    symbol=symbol, metadata=metadata, now=current,
-                )
+                users = await self._next_user_page(after_user_id)
             except Exception:
-                logger.exception("No se pudo encolar notificación de señal para usuario %s", user_id)
-                continue
-            counts["notifications_created"] += int(made)
-            counts["telegram_queued"] += int(made and telegram_queued)
-            counts["web_push_queued"] += int(made and prefs.get("web_push", False))
+                logger.exception("No se pudo obtener una página de usuarios para notificar una señal")
+                break
+            if not users:
+                break
+            counts["users_scanned"] += len(users)
+
+            async def process_signal_user(user: Mapping[str, Any]) -> dict[str, int]:
+                user_id = str(user.get("user_id") or "")
+                admin = is_admin_user(user)
+                access = evaluate_access(user, now=current, is_admin=admin)
+                if not user_id or not access.get("allowed") or not wants_alert(user, "signals"):
+                    return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+                # A live five-day trial has the same feature entitlement as Premium.
+                # Premium-only signals therefore reach paid Premium, trial, and admin
+                # accounts, but never expired/free accounts.
+                if visibility not in {"free", "public"} and not (
+                    admin or access.get("premium_active") or access.get("trial_active")
+                ):
+                    return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+                prefs = alert_preferences(user)
+                if not (prefs.get("in_app") or prefs.get("telegram") or prefs.get("web_push")):
+                    return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+                user_id = str(user.get("user_id") or "")
+                try:
+                    made, telegram_queued = await self._notify_user(
+                        user, event_id=event_id, kind="signals", title=title, message=message,
+                        symbol=symbol, metadata=metadata, now=current,
+                    )
+                except Exception:
+                    logger.exception("No se pudo encolar notificación de señal para usuario %s", user_id)
+                    return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+                return {
+                    "notifications_created": int(made),
+                    "telegram_queued": int(made and telegram_queued),
+                    "web_push_queued": int(made and prefs.get("web_push", False)),
+                }
+
+            outcomes = await _run_bounded(users, process_signal_user, concurrency=self.notify_concurrency)
+            for outcome in outcomes:
+                if isinstance(outcome, Exception):
+                    logger.warning("Error procesando destinatario de señal (%s)", type(outcome).__name__)
+                    continue
+                for key in ("notifications_created", "telegram_queued", "web_push_queued"):
+                    counts[key] += int(outcome.get(key, 0))
+            next_user_id = str(users[-1].get("user_id") or "")
+            if not next_user_id or next_user_id == after_user_id or len(users) < self.page_size:
+                break
+            after_user_id = next_user_id
         return counts
 
     async def _notify_user(self, user: Mapping[str, Any], *, event_id: str, kind: str, title: str,
