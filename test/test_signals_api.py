@@ -177,6 +177,18 @@ def test_signed_active_token_is_accepted(monkeypatch):
     assert response.status_code == 200
 
 
+def test_five_day_trial_has_full_access_to_premium_visibility_signals(monkeypatch):
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret")
+    token = _token({
+        "sub": "trial-user", "iat": time.time(), "exp": time.time() + 120,
+        "plan": "free", "trial_end": iso(5 * 24 * 60).isoformat(),
+    })
+    with TestClient(create_app(InMemorySignalRepository([raw_signal()]))) as tc:
+        response = tc.get("/signals", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200, response.text
+    assert response.json()[0]["symbol"] == "BTCUSDT"
+
+
 def test_timed_ban_expires_but_permanent_ban_blocks(monkeypatch):
     monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret")
     timed = _token({"sub": "u1", "iat": time.time(), "exp": time.time() + 120, "plan": "premium", "plan_end": iso(60).isoformat(), "banned": True, "ban_until": iso(-10).isoformat()})
@@ -206,6 +218,22 @@ def test_expired_plan_and_trial_are_denied(monkeypatch):
         response = tc.get("/signals", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 403
     assert response.json()["code"] == "ACCESS_EXPIRED"
+
+
+def test_expired_account_cannot_read_notification_inbox_or_alert_preferences(monkeypatch):
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret")
+    token = _token({
+        "sub": "expired-user", "iat": time.time(), "exp": time.time() + 120,
+        "plan": "free", "trial_end": iso(-1).isoformat(),
+    })
+    headers = {"Authorization": f"Bearer {token}"}
+    with TestClient(create_app(InMemorySignalRepository([]))) as tc:
+        notifications = tc.get("/notifications", headers=headers)
+        preferences = tc.get("/account/alert-preferences", headers=headers)
+    assert notifications.status_code == 403
+    assert notifications.json()["code"] == "ACCESS_EXPIRED"
+    assert preferences.status_code == 403
+    assert preferences.json()["code"] == "ACCESS_EXPIRED"
 
 
 def test_admin_is_not_blocked_by_ban_or_expired_plan(monkeypatch):

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -136,6 +136,39 @@ def test_radar_service_returns_auditable_source_and_caches_result():
     assert trends["4H"] in {"up", "down", "range", "transition", "volatile"}
     assert len(rest.calls) == count
     assert again["updated_at"] == data["updated_at"]
+
+
+def test_radar_includes_premium_visibility_setups_during_full_five_day_trial():
+    cache = InMemoryJsonCache()
+    run(cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {"symbol": "BTCUSDT", "price": 100, "volume_24h": 2_000_000_000, "change_pct": 1.0},
+    }, ttl_seconds=100))
+    run(cache.set_json(FUNDING_KEY, [{"symbol": "BTCUSDT", "lastFundingRate": 0.0001}], ttl_seconds=100))
+    repo = InMemorySignalRepository([{
+        "id": "trial-premium-setup", "symbol": "BTCUSDT", "direction": "LONG",
+        "status": "PENDING", "visibility": "premium",
+        "created_at": datetime.now(timezone.utc), "entry_price": 100,
+        "entry_zone": {"low": 99, "high": 100}, "take_profits": [105],
+        "stop_loss": 95, "score": 90,
+    }])
+    app = create_app(repository=repo, market_cache=cache, market_rest_client=FakeRest(),
+                     sweep_store=InMemorySweepStore())
+    trial_principal = Principal("trial-user", {
+        "sub": "trial-user", "plan": "free",
+        "trial_end": (datetime.now(timezone.utc) + timedelta(days=5)).isoformat(),
+        "tz": "UTC",
+    }, False)
+    app.dependency_overrides[current_principal] = lambda: trial_principal
+    app.dependency_overrides[require_analytical_access] = lambda: trial_principal
+
+    with TestClient(app) as client:
+        response = client.get("/radar")
+
+    assert response.status_code == 200, response.text
+    setups = response.json()["setups"]
+    assert len(setups) == 1
+    assert setups[0]["visibility"] == "premium"
+    assert setups[0]["symbol"] == "BTCUSDT"
 
 
 def test_timeframe_trends_for_unscanned_symbol_are_real_and_cached():

@@ -12,8 +12,13 @@ def test_trial_and_premium_access_are_resolved_from_utc_dates():
     trial = evaluate_access({"plan": "free", "trial_end": now + timedelta(hours=2)}, now=now)
     premium = evaluate_access({"plan": "premium", "plan_end": now + timedelta(days=30)}, now=now)
     assert trial["allowed"] and trial["status"] == "trial"
-    assert trial["features"]["signals"] is True
+    assert all(trial["features"][key] for key in (
+        "analytics", "signals", "market_radar", "derivatives", "statistics",
+    ))
     assert premium["allowed"] and premium["status"] == "premium"
+    assert all(premium["features"][key] for key in (
+        "analytics", "signals", "market_radar", "derivatives", "statistics",
+    ))
     assert premium["access_until"] == (now + timedelta(days=30)).isoformat().replace("+00:00", "Z")
 
 
@@ -23,8 +28,23 @@ def test_expired_trial_or_plan_loses_analytics_but_account_billing_remain_availa
     assert expired["allowed"] is False
     assert expired["reason"] == "ACCESS_EXPIRED"
     assert expired["features"]["analytics"] is False
+    assert all(not expired["features"][key] for key in (
+        "analytics", "signals", "market_radar", "derivatives", "statistics",
+    ))
     assert expired["features"]["account"] is True
     assert expired["features"]["billing"] is True
+
+
+def test_trial_expiry_boundary_is_exclusive_and_removes_all_platform_features():
+    now = datetime(2026, 10, 25, 12, 0, tzinfo=UTC)
+    at_expiry = evaluate_access({"plan": "free", "trial_end": now}, now=now)
+    assert at_expiry["allowed"] is False
+    assert at_expiry["status"] == "expired"
+    assert all(not at_expiry["features"][key] for key in (
+        "analytics", "signals", "market_radar", "derivatives", "statistics",
+    ))
+    assert at_expiry["features"]["account"] is True
+    assert at_expiry["features"]["billing"] is True
 
 
 def test_permanent_and_active_temporary_bans_block_non_admins():

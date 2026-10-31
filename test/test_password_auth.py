@@ -8,16 +8,16 @@ from api.services.auth import handle_telegram_contact, hash_token, utcnow
 from test.test_auth_api import configured
 
 
-def _verify_telegram_for_challenge(client: TestClient, repo, response):
+def _verify_telegram_for_challenge(client: TestClient, repo, response, *, telegram_user_id="4242", chat_id="4242"):
     assert response.status_code == 200, response.text
     token = response.json()["token"]
     challenge = repo.get_auth_request(hash_token(token))
     linked = handle_telegram_contact(
         repo,
         token_hash=str(challenge["token_hash"]),
-        sender_user_id="4242",
-        contact_user_id="4242",
-        chat_id="4242",
+        sender_user_id=telegram_user_id,
+        contact_user_id=telegram_user_id,
+        chat_id=chat_id,
         contact_phone=str(challenge["phone"]),
         username="ftrade_tester",
     )
@@ -131,3 +131,40 @@ def test_registration_persists_selected_spanish_language(monkeypatch):
         assert registered.status_code == 200, registered.text
         assert registered.json()["user"]["language"] == "es"
         assert repo.get_user_by_phone(phone)["language"] == "es"
+
+
+def test_password_recovery_does_not_disclose_unknown_phone_or_create_account(monkeypatch):
+    app, repo, _telegram = configured(monkeypatch)
+    existing_phone = "+17875559001"
+    unknown_phone = "+17875559002"
+    with TestClient(app) as client:
+        _token, registration_code = _verify_telegram_for_challenge(
+            client,
+            repo,
+            client.post("/auth/register", json={
+                "phone": existing_phone,
+                "password": "RecoveryTest-2026!",
+            }),
+        )
+        registered = client.post("/auth/verify", json={"phone": existing_phone, "code": registration_code})
+        assert registered.status_code == 200, registered.text
+
+        previous = repo.get_latest_login_request_for_phone(existing_phone)
+        repo.update_auth_request(
+            str(previous["token_hash"]),
+            {"created_at": utcnow() - timedelta(seconds=61)},
+        )
+        existing_response = client.post("/auth/recover", json={"phone": existing_phone})
+        unknown_response = client.post("/auth/recover", json={"phone": unknown_phone})
+
+        assert existing_response.status_code == unknown_response.status_code == 200
+        assert existing_response.json()["step"] == unknown_response.json()["step"] == "awaiting_telegram"
+        assert set(existing_response.json()) == set(unknown_response.json())
+
+        _token, unknown_code = _verify_telegram_for_challenge(
+            client, repo, unknown_response, telegram_user_id="4343", chat_id="4343"
+        )
+        verified_unknown = client.post("/auth/verify", json={"phone": unknown_phone, "code": unknown_code})
+        assert verified_unknown.status_code == 409
+        assert verified_unknown.json()["code"] == "RECOVERY_ACCEPTED"
+        assert repo.get_user_by_phone(unknown_phone) is None

@@ -59,7 +59,8 @@ def _configure_production(monkeypatch):
     monkeypatch.setenv("PAYMENT_WALLET_ADDRESS", "0x1111111111111111111111111111111111111111")
     monkeypatch.setenv("USDT_BEP20_CONTRACT", "0x55d398326f99059fF775485246999027B3197955")
     monkeypatch.setenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org")
-    monkeypatch.setenv("PREMIUM_PRICE_USDT", "40.00")
+    monkeypatch.setenv("PREMIUM_PRICE_USDT", "10.00")
+    monkeypatch.setenv("TRIAL_DAYS", "5")
     monkeypatch.setenv("CORS_ORIGINS", "https://ftrade.example.com")
 
 
@@ -127,6 +128,10 @@ def test_production_worker_status_is_stale_after_heartbeat_window(monkeypatch):
 
 def test_production_configuration_issues_are_reported_without_leaking_secrets(monkeypatch):
     monkeypatch.setenv("FTRADE_ENV", "production")
+    # Readiness must prevent a production deploy from silently changing the
+    # published business terms for Premium price or five-day trial duration.
+    monkeypatch.setenv("PREMIUM_PRICE_USDT", "40.00")
+    monkeypatch.setenv("TRIAL_DAYS", "7")
     for key in (
         "ACCESS_TOKEN_SECRET", "AUTH_CODE_PEPPER", "ADMIN_USER_IDS", "ADMIN_PHONE_NUMBERS", "TELEGRAM_AUTH_BOT_TOKEN",
         "TELEGRAM_AUTH_BOT_USERNAME", "PAYMENT_WALLET_ADDRESS", "CORS_ORIGINS", "FTRADE_DEPLOYMENT_NAME",
@@ -146,5 +151,7 @@ def test_production_configuration_issues_are_reported_without_leaking_secrets(mo
     assert "TELEGRAM_BOT_NOT_CONFIGURED" in issues
     assert "USDT_BEP20_PAYMENTS_NOT_CONFIGURED" in issues
     assert "CORS_ORIGINS_MISSING_OR_INSECURE" in issues
+    assert "PREMIUM_PRICE_MUST_BE_10_USDT" in issues
+    assert "TRIAL_DAYS_MUST_BE_5" in issues
     assert "FTRADE_DEPLOYMENT_NAME_NOT_SET_FOR_PRODUCTION" in issues
     assert "a" * 48 not in ready.text

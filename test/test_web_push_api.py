@@ -115,7 +115,10 @@ def test_push_subscription_isolated_by_user_and_endpoint_reassignment_prevents_o
         created = client.post("/push/subscriptions", json=subscription())
         sid = created.json()["id"]
 
-        other = Principal("usr_push_2", {"sub": "usr_push_2", "plan": "premium"}, False)
+        other = Principal("usr_push_2", {
+            "sub": "usr_push_2", "plan": "premium",
+            "plan_end": (datetime.now(UTC) + timedelta(days=30)).isoformat(),
+        }, False)
         app.dependency_overrides[current_principal] = lambda: other
         assert client.delete(f"/push/subscriptions/{sid}").status_code == 404
         reassigned = client.post("/push/subscriptions", json=subscription())

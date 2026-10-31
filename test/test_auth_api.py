@@ -82,7 +82,14 @@ def test_phone_telegram_code_creates_free_trial_user_and_httponly_refresh(monkey
         assert payload["user"]["language"] == "en"
         assert payload["user"]["telegram_chat_id"] == "4242"
         assert payload["user"]["is_admin"] is False
-        assert payload["user"]["alert_prefs"] == {"on": True, "liq": True, "mov": True, "vol": True}
+        stored_user = repo.get_user_by_phone("+17875551234")
+        assert stored_user["trial_end"] - stored_user["created_at"] == timedelta(days=5)
+        assert as_utc(payload["user"]["trial_end"]) - as_utc(payload["user"]["created_at"]) == timedelta(days=5)
+        assert payload["user"]["alert_prefs"] == {
+            "on": True, "liq": True, "mov": True, "vol": True,
+            "signals": True, "price": True, "plans": True,
+            "in_app": True, "telegram": True, "web_push": False,
+        }
         assert "ftrade_refresh" not in payload
         cookie = response.cookies.get("ftrade_refresh")
         assert cookie

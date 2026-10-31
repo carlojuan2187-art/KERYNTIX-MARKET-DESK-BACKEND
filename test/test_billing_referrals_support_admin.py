@@ -91,6 +91,19 @@ def build_client(monkeypatch, *, admin=False, chain=None):
     return TestClient(app), auth_repo, biz_repo, user_token, admin_token
 
 
+def test_premium_price_default_is_ten_usdt_when_environment_is_unset(monkeypatch):
+    monkeypatch.delenv("PREMIUM_PRICE_USDT", raising=False)
+    app = create_app(
+        InMemorySignalRepository([]), market_cache=InMemoryJsonCache(),
+        auth_repository=InMemoryAuthRepository(), market_rest_client=FakeRest(),
+        chain_verifier=FakeChain(),
+    )
+    with TestClient(app) as client:
+        response = client.get("/billing/plans")
+    assert response.status_code == 200
+    assert response.json()["plans"][0]["price_usdt"] == "10.000"
+
+
 def test_payment_confirmation_activates_premium_once(monkeypatch):
     chain = FakeChain()
     client, auth_repo, biz_repo, token, _ = build_client(monkeypatch, chain=chain)

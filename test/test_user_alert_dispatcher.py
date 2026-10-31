@@ -241,6 +241,29 @@ def test_public_signal_notification_can_reach_an_active_non_premium_user():
     assert len(features.list_notifications("trial-public")) == 1
 
 
+def test_premium_signal_notification_reaches_users_during_full_five_day_trial():
+    auth = InMemoryAuthRepository()
+    now = datetime.now(UTC)
+    prefs = {
+        "on": True, "signals": True, "liq": True, "mov": True, "vol": True,
+        "in_app": True, "telegram": False, "web_push": False,
+    }
+    auth.create_user_if_absent({
+        "user_id": "trial-premium-signal", "phone": "+17875550002", "plan": "free",
+        "plan_end": None, "trial_end": now + timedelta(days=5), "banned": False,
+        "ref_code": "trial-premium-signal", "alert_prefs": prefs,
+    })
+    features = InMemoryUserFeatureRepository()
+    processor = UserAlertProcessor(auth, features, InMemoryJsonCache(), NoTelegram())
+    outcome = asyncio.run(processor.notify_new_signal({
+        "id": "premium-during-trial", "symbol": "BTCUSDT", "direction": "LONG",
+        "visibility": "premium", "entry_price": 65000, "stop_loss": 64000,
+        "take_profits": [67000],
+    }, now=now))
+    assert outcome["notifications_created"] == 1
+    assert len(features.list_notifications("trial-premium-signal")) == 1
+
+
 def test_new_signal_notifications_follow_each_users_language_preference():
     auth = InMemoryAuthRepository()
     signal_prefs = {
