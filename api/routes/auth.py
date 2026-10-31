@@ -4,7 +4,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 
 from api.auth_schemas import (
-    AuthResendRequest, PhoneChallengeRequest, PhoneChallengeResponse,
+    AuthResendRequest, PasswordLoginRequest, PhoneChallengeRequest, PhoneChallengeResponse,
+    RegisterRequest, SetPasswordRequest,
     RefreshRequest, RefreshResponse, TelegramCheckResponse, UserPatchRequest, UserResponse,
     VerifyCodeRequest, VerifyCodeResponse,
 )
@@ -23,6 +24,43 @@ def _service(request: Request) -> AuthService:
 def request_phone_challenge(body: PhoneChallengeRequest, request: Request) -> dict:
     requester_ip = request.client.host if request.client else None
     return _service(request).start_phone_challenge(body.phone, ref_code=body.ref_code, requester_ip=requester_ip)
+
+
+@router.post("/register", response_model=PhoneChallengeResponse)
+def register_account(body: RegisterRequest, request: Request) -> dict:
+    requester_ip = request.client.host if request.client else None
+    return _service(request).start_registration_challenge(
+        body.phone, body.password, ref_code=body.ref_code, requester_ip=requester_ip
+    )
+
+
+@router.post("/recover", response_model=PhoneChallengeResponse)
+def recover_password(body: PhoneChallengeRequest, request: Request) -> dict:
+    requester_ip = request.client.host if request.client else None
+    return _service(request).start_password_recovery_challenge(body.phone, requester_ip=requester_ip)
+
+
+@router.post("/login", response_model=VerifyCodeResponse)
+def login_with_password(body: PasswordLoginRequest, request: Request, response: Response) -> dict:
+    user, access_token, refresh_token = _service(request).login_with_password(
+        body.phone, body.password, request=request
+    )
+    _service(request).set_refresh_cookie(response, refresh_token)
+    return {
+        "access_token": access_token,
+        "user": user,
+        "is_new": False,
+        "refresh_token": refresh_token if refresh_in_body_enabled() else None,
+    }
+
+
+@router.post("/password", response_model=UserResponse)
+def set_account_password(
+    body: SetPasswordRequest,
+    request: Request,
+    principal: Principal = Depends(current_principal),
+) -> dict:
+    return _service(request).set_password(principal.user_id, body.password)
 
 
 @router.get("/telegram-check", response_model=TelegramCheckResponse)
