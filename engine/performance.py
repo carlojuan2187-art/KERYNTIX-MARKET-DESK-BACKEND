@@ -43,6 +43,15 @@ def period_start(period: str, *, now: datetime | None = None) -> datetime | None
 
 
 def _exit_price(row: Mapping[str, Any]) -> float | None:
+    # New immutable v2 results store the exit level explicitly. Legacy snapshots
+    # are reconstructed from their SL/TP fields as before.
+    raw_exit = row.get("exit_price")
+    try:
+        explicit = float(raw_exit)
+        if isfinite(explicit) and explicit > 0:
+            return explicit
+    except (TypeError, ValueError, OverflowError):
+        pass
     result = str(row.get("result") or "").upper()
     if result == "SL":
         raw = row.get("stop_loss")
@@ -102,6 +111,11 @@ def build_performance(rows: Sequence[Mapping[str, Any]], *, period: str, now: da
             "exit_price": exit_price,
             "result": result,
             "r_result": r_real,
+            "calculation_version": str(row.get("calculation_version") or "legacy_v1"),
+            "execution_model": row.get("execution_model"),
+            "entry_reference": row.get("entry_reference"),
+            "exit_via": row.get("exit_via"),
+            "ambiguous": bool(row.get("ambiguous", False)),
             "touched_at": as_utc(row.get("touched_at")),
             "closed_at": closed_at,
         })
@@ -158,6 +172,8 @@ def build_performance(rows: Sequence[Mapping[str, Any]], *, period: str, now: da
         "curve": curve,
         "trades": public_trades,
         "data_integrity_warnings": sum(1 for trade in closed if trade["exit_price"] is None),
+        "legacy_results": sum(1 for trade in closed if trade["calculation_version"] != "2.0"),
+        "calculation_version": "2.0",
         "period_start": start.isoformat().replace("+00:00", "Z") if start else None,
         "calculation_timezone": "UTC",
     }
