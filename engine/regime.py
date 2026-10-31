@@ -11,6 +11,8 @@ un snapshot. El scanner lo refresca periódicamente y el botón del bot sólo le
 la caché en memoria, por lo que la respuesta es instantánea.
 """
 
+from __future__ import annotations
+
 import copy
 import logging
 import threading
@@ -18,8 +20,12 @@ import time
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
-import numpy as np
-import pandas as pd
+from engine._lazy import LazyModule
+
+# pandas/numpy are only needed when an analysis actually runs; keep them out of the
+# import path of workers that merely read this module's constants.
+np = LazyModule("numpy")
+pd = LazyModule("pandas")
 
 logger = logging.getLogger(__name__)
 
