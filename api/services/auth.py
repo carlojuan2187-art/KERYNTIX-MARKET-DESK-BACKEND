@@ -220,6 +220,7 @@ def _normalize_user_for_response(user: Mapping[str, Any]) -> dict[str, Any]:
     result = dict(user)
     result.pop("_id", None)
     result.pop("password_hash", None)
+    result["language"] = "es" if result.get("language") == "es" else "en"
     for key in ("created_at", "last_activity", "trial_end", "plan_end", "ban_until", "banned_at"):
         result[key] = iso_utc(as_utc(result.get(key))) if result.get(key) is not None else None
     result["is_admin"] = is_admin_user(user)
@@ -234,6 +235,7 @@ def _user_creation_document(request_doc: Mapping[str, Any], referrer: Mapping[st
     user: dict[str, Any] = {
         "user_id": user_id,
         "phone": str(request_doc["phone"]),
+        "language": "es" if request_doc.get("language") == "es" else "en",
         "telegram_chat_id": str(request_doc["telegram_chat_id"]),
         "plan": "free",
         "trial_end": now + timedelta(days=trial_days),
@@ -298,7 +300,7 @@ class AuthService:
         self.repository.create_auth_request(document)
         return {"token": token, "phone": phone, "step": "awaiting_telegram", "expires_at": iso_utc(link_expires), "resend_at": iso_utc(now + timedelta(seconds=RESEND_SECONDS))}
 
-    def start_registration_challenge(self, phone: str, password: str, *, ref_code: str | None = None, requester_ip: str | None = None) -> dict[str, Any]:
+    def start_registration_challenge(self, phone: str, password: str, *, ref_code: str | None = None, requester_ip: str | None = None, language: str = "en") -> dict[str, Any]:
         """Begin a new account registration; only this flow creates password accounts."""
         if self.repository.get_user_by_phone(phone):
             raise HTTPException(status_code=409, detail={"code": "ACCOUNT_ALREADY_EXISTS", "message": "Ya existe una cuenta con este teléfono. Inicia sesión o recupera tu contraseña."})
@@ -322,6 +324,7 @@ class AuthService:
             "flow": "register",
             "phone": phone,
             "password_hash": hash_password(password),
+            "language": "es" if language == "es" else "en",
             "ref_code": ref_code if referrer else None,
             "created_at": now,
             "link_expires_at": link_expires,
@@ -555,6 +558,8 @@ class AuthService:
                 ZoneInfo(str(updates["tz"]))
             except (ZoneInfoNotFoundError, ValueError, TypeError) as exc:
                 raise HTTPException(status_code=422, detail={"code": "INVALID_TIMEZONE", "message": "tz debe ser una zona horaria IANA válida."}) from exc
+        if "language" in updates and updates["language"] not in {"en", "es"}:
+            raise HTTPException(status_code=422, detail={"code": "INVALID_LANGUAGE", "message": "language debe ser en o es."})
         if "exchange" in updates and updates["exchange"] is not None:
             updates["exchange"] = str(updates["exchange"]).strip()
         updates["last_activity"] = utcnow()

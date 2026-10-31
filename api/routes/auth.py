@@ -30,7 +30,7 @@ def request_phone_challenge(body: PhoneChallengeRequest, request: Request) -> di
 def register_account(body: RegisterRequest, request: Request) -> dict:
     requester_ip = request.client.host if request.client else None
     return _service(request).start_registration_challenge(
-        body.phone, body.password, ref_code=body.ref_code, requester_ip=requester_ip
+        body.phone, body.password, ref_code=body.ref_code, requester_ip=requester_ip, language=body.language
     )
 
 

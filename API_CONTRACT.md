@@ -24,7 +24,7 @@ Regla canónica de acceso: el servidor evalúa `domain/plans.py` con el registro
 
 | Método y ruta                        | Request                                                 | Response 200                                                  | Errores adicionales                          |
 | ------------------------------------ | ------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------- |
-| `POST /auth/register`                | `{phone,password,ref_code?}`; teléfono E.164 y contraseña de 10–128 caracteres | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 409 teléfono registrado; 422 input; 429 frecuencia |
+| `POST /auth/register`                | `{phone,password,language?,ref_code?}`; teléfono E.164, contraseña de 10–128 caracteres y `language` opcional (`en` por defecto, `es` permitido) | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 409 teléfono registrado; 422 input; 429 frecuencia |
 | `POST /auth/login`                   | `{phone,password}`; teléfono E.164                      | `{access_token,user:User,is_new:false}` + cookie refresh     | 401 credenciales inválidas; 409 `PASSWORD_SETUP_REQUIRED`; 429 intentos |
 | `POST /auth/recover`                 | `{phone}` E.164; cuenta existente                        | `{token,phone,step:"awaiting_telegram",expires_at,resend_at}` | 404 cuenta; 429 frecuencia                  |
 | `POST /auth/password`                | `{password}`; sesión verificada requerida                | `User` actualizado                                           | 401 sesión; 422 contraseña                   |
@@ -234,3 +234,8 @@ Todas las rutas están protegidas por el control de acceso analítico. Se reutil
 ### Contrato real del backend — Fase 14
 
 Las rutas `watchlist`, `account/alert-preferences`, `alerts/price` y `notifications` de arriba describen el backend actual. Su lógica y persistencia están implementadas, pero todavía no todas las pantallas React consumen estos endpoints; se conectarán después del cierre de la lógica de negocio, conservando la apariencia del frontend. La watchlist incluye `analyses` por temporalidad, `score_detail`, `liquidity_sweep` y `active_signal`; los campos analíticos que no se pueden calcular se devuelven como `null`. El worker `worker.user_alerts` refresca snapshots de mercado para que los avisos automáticos no dependan de una visita del usuario.
+
+
+### Preferencia de idioma
+
+`User.language` es `"en"` o `"es"`. Las cuentas nuevas y las cuentas antiguas sin preferencia explícita se normalizan a `"en"`. `PATCH /auth/me` permite guardar la elección del usuario y `GET /auth/me`, `/auth/login`, `/auth/verify` y `/auth/refresh` la devuelven como parte del usuario. El frontend usa inglés como idioma inicial y conserva la elección localmente para páginas públicas/login, sincronizándola con el perfil autenticado cuando el usuario cambia el selector.

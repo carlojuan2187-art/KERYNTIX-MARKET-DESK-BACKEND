@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from api.repositories.auth import AuthRepository
 from api.services.auth import is_admin_user
 from api.services.telegram import TelegramBotAPI
+from api.services.localization import localize_notification
 from domain.plans import as_utc, evaluate_access, iso_utc
 
 logger = logging.getLogger("ftrade.plans")
@@ -189,7 +190,14 @@ class PlanMaintenanceService:
                         logger.warning("No se pudo encolar aviso de plan a %s (%s)", user_id, type(exc).__name__)
                     continue
                 try:
-                    self.telegram.send_message(str(chat_id), message)
+                    _title = {
+                        "trial_ending": "Tu periodo de prueba termina pronto",
+                        "trial_expired": "Tu periodo de prueba ha terminado",
+                        "premium_ending": "Tu suscripción Premium termina pronto",
+                        "premium_expired": "Tu suscripción Premium ha terminado",
+                    }.get(kind, "Actualización de tu plan FTrade")
+                    _title, localized_message = localize_notification(_title, message, user.get("language", "en"))
+                    self.telegram.send_message(str(chat_id), localized_message)
                 except Exception as exc:
                     self.repository.finish_plan_notice(dedupe_key, claim_id, sent=False, now=current, error=type(exc).__name__)
                     counts["failed"] += 1

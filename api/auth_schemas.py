@@ -27,6 +27,7 @@ class PhoneChallengeRequest(StrictModel):
 
 class RegisterRequest(PhoneChallengeRequest):
     password: str = Field(min_length=10, max_length=128)
+    language: Literal["en", "es"] = "en"
 
 
 class PasswordLoginRequest(StrictModel):
@@ -77,6 +78,7 @@ class AuthResendRequest(StrictModel):
 
 
 class UserPatchRequest(StrictModel):
+    language: Literal["en", "es"] | None = None
     exchange: str | None = Field(default=None, max_length=80)
     tz: str | None = Field(default=None, min_length=1, max_length=64)
     risk_profile: dict[str, float] | None = None
@@ -112,6 +114,7 @@ class UserResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     user_id: str
     phone: str
+    language: Literal["en", "es"] = "en"
     telegram_chat_id: str | None = None
     username: str | None = None
     plan: Literal["free", "premium"] = "free"

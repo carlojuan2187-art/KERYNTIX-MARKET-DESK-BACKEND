@@ -14,6 +14,7 @@ from typing import Any, Mapping
 from api.repositories.auth import AuthRepository
 from api.repositories.user_features import UserFeatureRepository
 from api.services.user_features import alert_preferences
+from api.services.localization import localize_notification
 
 logger = logging.getLogger("ftrade.business_notifications")
 UTC = timezone.utc
@@ -76,7 +77,10 @@ class BusinessNotificationService:
 
         safe_metadata = dict(metadata or {})
         safe_metadata.update({"transactional": True, "business_event": str(business_event)[:80]})
-        clean_title, clean_message = str(title).strip()[:160], str(message).strip()[:2000]
+        clean_title, clean_message = localize_notification(
+            str(title).strip(), str(message).strip(), user.get("language", "en")
+        )
+        clean_title, clean_message = clean_title[:160], clean_message[:2000]
         document: dict[str, Any] = {
             "id": uuid.uuid4().hex,
             "user_id": target,

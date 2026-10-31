@@ -317,7 +317,7 @@ class InMemoryAuthRepository:
             for user in self._users.values():
                 selected.append(deepcopy({key: user.get(key) for key in (
                     "user_id", "telegram_chat_id", "alert_prefs", "plan", "plan_end",
-                    "trial_end", "banned", "ban_until", "is_admin", "watchlist",
+                    "trial_end", "banned", "ban_until", "is_admin", "watchlist", "language",
                 )}))
                 if len(selected) >= max(1, min(int(limit), 10000)):
                     break
@@ -682,7 +682,7 @@ class MongoAuthRepository:
         projection = {
             "user_id": 1, "telegram_chat_id": 1, "alert_prefs": 1, "plan": 1,
             "plan_end": 1, "trial_end": 1, "banned": 1, "ban_until": 1,
-            "is_admin": 1, "watchlist": 1,
+            "is_admin": 1, "watchlist": 1, "language": 1,
         }
         cursor = self._users.find({}, projection).limit(max(1, min(int(limit), 10000)))
         return [self._clean(doc) or {} for doc in cursor]
