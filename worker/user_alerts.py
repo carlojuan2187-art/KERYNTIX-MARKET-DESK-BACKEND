@@ -20,6 +20,7 @@ from api.cache import JsonCache, cache_from_environment
 from api.repositories.auth import AuthRepository, auth_repository_from_environment
 from api.repositories.user_features import UserFeatureRepository, user_feature_repository_from_environment
 from api.services.market import QUOTES_KEY
+from api.services.localization import localize_notification
 from api.services.telegram import TelegramBotAPI
 from api.services.user_features import alert_preferences, wants_alert
 from api.services.auth import is_admin_user
@@ -268,6 +269,7 @@ class UserAlertProcessor:
     async def _notify_user(self, user: Mapping[str, Any], *, event_id: str, kind: str, title: str,
                            message: str, symbol: str | None, metadata: dict[str, Any], now: datetime) -> tuple[bool, bool]:
         user_id = str(user.get("user_id") or "")
+        title, message = localize_notification(title, message, user.get("language", "en"))
         prefs = alert_preferences(user)
         use_in_app = bool(prefs.get("in_app", True))
         chat_id = user.get("telegram_chat_id")
