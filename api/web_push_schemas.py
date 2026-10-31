@@ -84,3 +84,12 @@ class WebPushSubscriptionListResponse(BaseModel):
     items: list[WebPushSubscriptionResponse]
     total: int
     max_items: int
+
+
+class WebPushSubscriptionDelete(StrictModel):
+    endpoint: str = Field(min_length=40, max_length=2048)
+
+    @field_validator("endpoint")
+    @classmethod
+    def validate_endpoint(cls, value: str) -> str:
+        return validate_push_endpoint(value)
