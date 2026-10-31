@@ -9,7 +9,9 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Mapping
 
-import pandas as pd
+from engine._lazy import LazyModule
+
+pd = LazyModule("pandas")  # deferred: only the watchlist analysis path needs pandas
 
 from fastapi import HTTPException
 
@@ -19,7 +21,14 @@ from api.repositories.user_features import UserFeatureRepository
 from api.services.market import QUOTES_KEY, MarketDataService
 from api.cache import JsonCache
 from engine.watchlist import (MAX_PAIRS, TIMEFRAMES, normalize_symbol, short_name, user_symbols, compute_score)
-from engine.regime import analyze_timeframe
+
+
+def analyze_timeframe(*args: Any, **kwargs: Any) -> Any:
+    """Lazy proxy so importing this module does not import pandas/numpy via engine.regime."""
+    from engine.regime import analyze_timeframe as _analyze_timeframe
+    return _analyze_timeframe(*args, **kwargs)
+
+
 from api.repositories.sweeps import SweepStore
 from worker.binance_rest import BinanceDataError
 
