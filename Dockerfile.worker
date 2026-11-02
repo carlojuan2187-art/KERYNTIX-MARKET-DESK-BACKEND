@@ -1,4 +1,4 @@
-# Dedicated Railway service for FTrade background workers.
+# Dedicated Railway service for KERYNTIX MARKET DESK background workers.
 # Keep this separate from Dockerfile, which runs the public FastAPI process.
 FROM python:3.11-slim-bookworm
 

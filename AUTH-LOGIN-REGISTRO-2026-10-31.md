@@ -1,4 +1,4 @@
-# FTrade — Autenticación con contraseña
+# KERYNTIX MARKET DESK — Autenticación con contraseña
 
 ## Endpoints
 

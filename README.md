@@ -1,4 +1,4 @@
-# FTrade Web — Fase 23: entorno reproducible e integración de infraestructura
+# KERYNTIX MARKET DESK Web — Fase 23: entorno reproducible e integración de infraestructura
 
 Esta fase prepara el entorno para verificar el backend con **Python 3.11** y con **MongoDB y Redis reales**, sin desplegarlo todavía. El frontend se conserva y no se cambia su diseño.
 
@@ -24,7 +24,7 @@ docker compose -f docker-compose.integration.yml up --build --abort-on-container
 Build de runtime:
 
 ```bash
-docker build --target runtime -t ftrade-backend:local .
+docker build --target runtime -t keryntix-market-desk-backend:local .
 ```
 
 Si el proyecto backend se mueve al repositorio independiente acordado, el contenido de la carpeta `backend/` debe ser la raíz de ese repositorio. En ese momento GitHub reconocerá automáticamente `backend/.github/workflows/backend-ci.yml` como `.github/workflows/backend-ci.yml`.

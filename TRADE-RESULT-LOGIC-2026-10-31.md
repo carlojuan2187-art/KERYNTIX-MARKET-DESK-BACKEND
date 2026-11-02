@@ -1,4 +1,4 @@
-# FTrade — metodología de resultados 2.0
+# KERYNTIX MARKET DESK — metodología de resultados 2.0
 
 ## Modelo de entrada y riesgo
 

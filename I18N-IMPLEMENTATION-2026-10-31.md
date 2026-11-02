@@ -1,4 +1,4 @@
-# FTrade language preference and localized notifications — 2026-10-31
+# KERYNTIX MARKET DESK language preference and localized notifications — 2026-10-31
 
 ## API behavior
 - User language is restricted to `en` or `es`.

@@ -1,4 +1,4 @@
-# FTrade — Fase 3: escalabilidad y rendimiento
+# KERYNTIX MARKET DESK — Fase 3: escalabilidad y rendimiento
 
 Fecha: 31/10/2026
 

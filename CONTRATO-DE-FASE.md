@@ -1,4 +1,4 @@
-# FTrade Web — Fase 23: entorno reproducible y pruebas de integración
+# KERYNTIX MARKET DESK Web — Fase 23: entorno reproducible y pruebas de integración
 
 ## Objetivo
 
@@ -34,7 +34,7 @@ La base de datos de integración está aislada (`ftrade_web_integration`). No ap
 Desde `backend/`:
 
 ```bash
-docker build --target runtime -t ftrade-backend:local .
+docker build --target runtime -t keryntix-market-desk-backend:local .
 ```
 
 La imagen expone el puerto `8000` por defecto, acepta `PORT` y tiene un healthcheck HTTP sobre `/live`. En Railway, configura el healthcheck de readiness por separado si quieres bloquear tráfico hasta que MongoDB/Redis y los procesos necesarios estén listos.

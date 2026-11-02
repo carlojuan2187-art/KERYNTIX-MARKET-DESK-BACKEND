@@ -1,4 +1,4 @@
-# FTrade — cambios de derivados y notificaciones (2026-10-31)
+# KERYNTIX MARKET DESK — cambios de derivados y notificaciones (2026-10-31)
 
 ## Derivados / Binance
 - Se quitaron las consultas a `/futures/data/topLongShortAccountRatio` y `/futures/data/topLongShortPositionRatio` del servicio web de analítica.

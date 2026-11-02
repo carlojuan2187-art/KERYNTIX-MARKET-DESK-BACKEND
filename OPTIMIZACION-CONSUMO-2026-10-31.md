@@ -1,4 +1,4 @@
-# FTrade — Optimización de consumo (31/10/2026)
+# KERYNTIX MARKET DESK — Optimización de consumo (31/10/2026)
 
 Objetivo: bajar RAM, CPU y egress de red en Railway sin cambiar señales, indicadores, planes ni la experiencia del usuario.
 

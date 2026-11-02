@@ -1,4 +1,4 @@
-# FTrade — Corrección del histórico de funding
+# KERYNTIX MARKET DESK — Corrección del histórico de funding
 
 Fecha: 2026-10-31
 

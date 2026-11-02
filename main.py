@@ -1,4 +1,4 @@
-"""FTrade API entrypoint: signals, market data, authentication and account sessions."""
+"""KERYNTIX MARKET DESK API entrypoint: signals, market data, authentication and account sessions."""
 from __future__ import annotations
 
 from api.logging_config import configure_logging
@@ -327,9 +327,9 @@ def create_app(
                     gateway_closer()
 
     app = FastAPI(
-        title="FTrade API",
+        title="KERYNTIX MARKET DESK API",
         version="0.21.0",
-        description="API FTrade de mercado, señales, cuentas, planes, pagos Premium, referidos, notificaciones transaccionales, soporte, Web Push, administración y readiness.",
+        description="API de KERYNTIX MARKET DESK para mercado, señales, cuentas, planes, pagos Premium, referidos, notificaciones transaccionales, soporte, Web Push, administración y readiness.",
         lifespan=lifespan,
     )
     app.state.signal_repository = selected_repository

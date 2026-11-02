@@ -18,7 +18,7 @@
 ## Cómo obtener evidencia ejecutada
 
 1. Ejecutar `docker compose -f docker-compose.integration.yml up --build --abort-on-container-exit backend-integration-tests` desde `backend/`.
-2. Ejecutar `docker build --target runtime -t ftrade-backend:local .`.
+2. Ejecutar `docker build --target runtime -t keryntix-market-desk-backend:local .`.
 3. Ejecutar la suite completa del workflow `.github/workflows/backend-ci.yml` después de mover `backend/` a la raíz del repositorio backend.
 
 No se publican conteos de pruebas aprobadas en esta fase porque no se pudieron ejecutar en este entorno las nuevas pruebas de infraestructura ni el runner Python 3.11.

@@ -1,4 +1,4 @@
-# Estado de consolidación FTrade — 25 de octubre de 2026
+# Estado de consolidación KERYNTIX MARKET DESK — 25 de octubre de 2026
 
 ## Actualización — temporalidades de gráfico de 1 y 5 minutos (26 de octubre de 2026)
 

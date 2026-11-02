@@ -1,4 +1,4 @@
-# FTrade: despliegue del feed y los workers en Railway
+# KERYNTIX MARKET DESK: despliegue del feed y los workers en Railway
 
 La API y el proceso de workers son servicios distintos. El `Dockerfile` normal inicia solamente `uvicorn main:app`; no inicia `worker.market_feed`. Por eso la API puede contestar con un snapshot REST y, al mismo tiempo, no emitir ticks en vivo.
 
