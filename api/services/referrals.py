@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from datetime import datetime, timezone
 from typing import Any
 
@@ -134,11 +134,20 @@ class ReferralService:
         # Referral links must land on the public web app, not in the Telegram bot.
         # FRONTEND_URL can be customized per deployment; use the production web
         # domain as a safe default for the current Railway deployment.
+        default_frontend_url = "https://keryntix-market-desk-production.up.railway.app"
         frontend_url = (
             os.getenv("FRONTEND_URL")
             or os.getenv("PUBLIC_FRONTEND_URL")
-            or "https://ftrade-web-production.up.railway.app"
+            or default_frontend_url
         ).strip().rstrip("/")
+        # During the brand/domain migration, Railway may still have the previous
+        # FRONTEND_URL saved. Replace only that known legacy host; preserve custom domains.
+        try:
+            configured_host = (urlsplit(frontend_url).hostname or "").lower()
+        except ValueError:
+            configured_host = ""
+        if configured_host == "ftrade-web-production.up.railway.app":
+            frontend_url = default_frontend_url
         link = f"{frontend_url}/r/{quote(ref_code, safe='')}"
         total_referred = self.auth_repository.count_referred_users(str(user_id))
         records = self.repository.list_referrals(str(user_id))
