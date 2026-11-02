@@ -374,5 +374,5 @@ def test_referral_summary_links_to_frontend_registration_page(monkeypatch):
 
     summary = service.summary("usr_referral_link")
 
-    assert summary["referral_link"] == "https://ftrade-web-production.up.railway.app/r/ref_usr_referral_link"
+    assert summary["referral_link"] == "https://keryntix-market-desk-production.up.railway.app/r/ref_usr_referral_link"
     assert "t.me/" not in summary["referral_link"]
