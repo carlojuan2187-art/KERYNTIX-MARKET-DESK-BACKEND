@@ -118,6 +118,35 @@ def test_price_alert_crud_and_owner_isolation():
         assert deleted.status_code == 204
 
 
+def test_notification_inbox_delete_all_is_user_scoped_and_preserves_pending_delivery():
+    app, _auth, features, _cache, principal = setup()
+    now = datetime.now(UTC)
+    for row in [
+        {"id": "clear-1", "user_id": principal.user_id, "event_id": "clear-e1", "kind": "mov", "title": "One", "message": "First", "created_at": now, "read_at": None, "in_app": True},
+        {"id": "clear-2", "user_id": principal.user_id, "event_id": "clear-e2", "kind": "liq", "title": "Two", "message": "Second", "created_at": now, "read_at": now, "in_app": True},
+        {"id": "clear-pending-telegram", "user_id": principal.user_id, "event_id": "clear-e3", "kind": "mov", "title": "Queued Telegram", "message": "Pending", "created_at": now, "read_at": None, "in_app": True,
+         "telegram_delivery": {"status": "pending"}},
+        {"id": "clear-pending-push", "user_id": principal.user_id, "event_id": "clear-e4", "kind": "mov", "title": "Queued Push", "message": "Pending", "created_at": now, "read_at": None, "in_app": True,
+         "web_push_delivery": {"status": "retry"}},
+        {"id": "clear-other-user", "user_id": "usr_features_2", "event_id": "clear-e5", "kind": "mov", "title": "Other", "message": "Keep", "created_at": now, "read_at": None, "in_app": True},
+    ]:
+        features.create_notification(row)
+
+    with TestClient(app) as client:
+        cleared = client.delete("/notifications")
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["deleted"] == 4
+        assert cleared.json()["unread_count"] == 0
+        assert client.get("/notifications").json()["items"] == []
+
+    # In-flight Telegram/Web Push records remain in storage for their delivery workers.
+    claim = features.claim_telegram_delivery(now=now, lease_until=now + timedelta(seconds=30), claim_id="after-clear")
+    assert claim is not None and claim["id"] == "clear-pending-telegram"
+    assert features._notifications["clear-pending-push"]["in_app"] is False
+    assert features._notifications["clear-pending-push"]["web_push_delivery"]["status"] == "retry"
+    assert features.list_notifications("usr_features_2")[0]["id"] == "clear-other-user"
+
+
 def test_notification_inbox_read_all_delete_and_user_isolation():
     app, _auth, features, _cache, principal = setup()
     now = datetime.now(UTC)
