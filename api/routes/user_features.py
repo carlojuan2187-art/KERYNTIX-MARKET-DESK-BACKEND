@@ -99,6 +99,12 @@ def mark_all_notifications_read(request: Request, principal: Principal = Depends
     return _notifications(request).mark_all_read(principal.user_id)
 
 
+@router.delete("/notifications")
+def delete_all_notifications(request: Request,
+                             principal: Principal = Depends(require_analytical_access)) -> dict:
+    return _notifications(request).delete_all(principal.user_id)
+
+
 @router.delete("/notifications/{notification_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_notification(notification_id: str, request: Request,
                         principal: Principal = Depends(require_analytical_access)) -> Response:
