@@ -129,16 +129,16 @@ class PlanMaintenanceService:
         trial_active = trial_end is not None and trial_end > now
         if trial_end and since <= trial_end <= until:
             if trial_end > now and not premium_active:
-                notices.append(("trial_ending", trial_end, "Tu periodo de prueba de FTrade termina pronto. Revisa tus opciones de suscripción para mantener el acceso."))
+                notices.append(("trial_ending", trial_end, "Tu periodo de prueba de KERYNTIX MARKET DESK termina pronto. Revisa tus opciones de suscripción para mantener el acceso."))
             elif trial_end <= now and not premium_active:
-                notices.append(("trial_expired", trial_end, "Tu periodo de prueba de FTrade ha terminado. Puedes revisar los planes disponibles desde tu cuenta."))
+                notices.append(("trial_expired", trial_end, "Tu periodo de prueba de KERYNTIX MARKET DESK ha terminado. Puedes revisar los planes disponibles desde tu cuenta."))
         if premium and plan_end and since <= plan_end <= until:
             if plan_end > now:
-                notices.append(("premium_ending", plan_end, "Tu suscripción Premium de FTrade termina pronto. Revisa tu cuenta para renovarla."))
+                notices.append(("premium_ending", plan_end, "Tu suscripción Premium de KERYNTIX MARKET DESK termina pronto. Revisa tu cuenta para renovarla."))
             else:
-                message = ("Tu periodo Premium de FTrade ha terminado, pero tu periodo de prueba sigue activo hasta "
+                message = ("Tu periodo Premium de KERYNTIX MARKET DESK ha terminado, pero tu periodo de prueba sigue activo hasta "
                            f"{iso_utc(trial_end)}. Puedes revisar los planes disponibles desde tu cuenta.") if trial_active else (
-                           "Tu periodo Premium de FTrade ha terminado. Puedes revisar las opciones de renovación desde tu cuenta.")
+                           "Tu periodo Premium de KERYNTIX MARKET DESK ha terminado. Puedes revisar las opciones de renovación desde tu cuenta.")
                 notices.append(("premium_expired", plan_end, message))
         return notices
 
@@ -170,7 +170,7 @@ class PlanMaintenanceService:
                             "trial_expired": "Tu periodo de prueba ha terminado",
                             "premium_ending": "Tu suscripción Premium termina pronto",
                             "premium_expired": "Tu suscripción Premium ha terminado",
-                        }.get(kind, "Actualización de tu plan FTrade")
+                        }.get(kind, "Actualización de tu plan KERYNTIX MARKET DESK")
                         queued = self.business_notifications.enqueue(
                             user_id, event_id=f"plan-notice:{dedupe_key}", title=title, message=message,
                             business_event=f"plan.{kind}", metadata={"notice_kind": kind, "boundary": iso_utc(boundary)}, now=current,
@@ -195,7 +195,7 @@ class PlanMaintenanceService:
                         "trial_expired": "Tu periodo de prueba ha terminado",
                         "premium_ending": "Tu suscripción Premium termina pronto",
                         "premium_expired": "Tu suscripción Premium ha terminado",
-                    }.get(kind, "Actualización de tu plan FTrade")
+                    }.get(kind, "Actualización de tu plan KERYNTIX MARKET DESK")
                     _title, localized_message = localize_notification(_title, message, user.get("language", "en"))
                     self.telegram.send_message(str(chat_id), localized_message)
                 except Exception as exc:

@@ -105,10 +105,10 @@ def current_principal(request: Request, credentials: HTTPAuthorizationCredential
     if production and issuer != "ftrade-web":
         raise HTTPException(
             status_code=401,
-            detail={"code": "LEGACY_TOKEN_NOT_ALLOWED", "message": "La sesión debe renovarse con el servicio actual de FTrade."},
+            detail={"code": "LEGACY_TOKEN_NOT_ALLOWED", "message": "La sesión debe renovarse con el servicio actual de KERYNTIX MARKET DESK."},
             headers={"WWW-Authenticate": "Bearer"},
         )
-    # Tokens minted by FTrade Web reference a persisted refresh session; the
+    # Tokens minted by the KERYNTIX MARKET DESK web client reference a persisted refresh session; the
     # session, account status, plan and ban are checked on each request.
     if issuer == "ftrade-web":
         session_id = principal.claims.get("sid")

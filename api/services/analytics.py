@@ -1,4 +1,4 @@
-"""Market analytics services ported from the original FTrade bot.
+"""Market analytics services ported from the original KERYNTIX MARKET DESK signal engine.
 
 The algorithms live in engine/ and retain their original thresholds. This layer only
 fetches source data, caches snapshots in the shared cache, and shapes the public API.

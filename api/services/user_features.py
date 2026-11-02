@@ -440,7 +440,7 @@ class NotificationService:
         for row in rows:
             items.append({
                 "id": str(row.get("id", "")), "event_id": str(row.get("event_id", "")),
-                "kind": str(row.get("kind", "general")), "title": str(row.get("title", "FTrade")),
+                "kind": str(row.get("kind", "general")), "title": str(row.get("title", "KERYNTIX MARKET DESK")),
                 "message": str(row.get("message", "")), "symbol": row.get("symbol"),
                 "metadata": row.get("metadata") if isinstance(row.get("metadata"), dict) else {},
                 "created_at": iso(row.get("created_at")), "read_at": iso(row.get("read_at")),
@@ -463,7 +463,3 @@ class NotificationService:
     def delete(self, user_id: str, notification_id: str) -> None:
         if not self.features.delete_notification(str(notification_id), str(user_id)):
             raise _http("NOTIFICATION_NOT_FOUND", 404, "La notificación no existe.")
-
-    def delete_all(self, user_id: str) -> dict[str, int]:
-        deleted = self.features.delete_all_notifications(str(user_id))
-        return {"deleted": deleted, "unread_count": self.features.unread_count(str(user_id))}

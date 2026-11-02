@@ -1,4 +1,4 @@
-"""REST routes for the original FTrade market-analysis modules."""
+"""REST routes for the KERYNTIX MARKET DESK market-analysis modules."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response

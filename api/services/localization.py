@@ -24,8 +24,8 @@ def localize_notification(title: str, message: str, language: Any = "en") -> tup
     if match:
         direction, symbol = match.groups()
         title = f"New {direction} signal · {symbol}"
-        message = re.sub(r"^FTrade publicó una nueva señal (LONG|SHORT) para ([A-Z0-9_]+)\.",
-                         r"FTrade published a new \1 signal for \2.", message)
+        message = re.sub(r"^KERYNTIX MARKET DESK publicó una nueva señal (LONG|SHORT) para ([A-Z0-9_]+)\.",
+                         r"KERYNTIX MARKET DESK published a new \1 signal for \2.", message)
         message = re.sub(r"(?<![A-Za-z])Entrada:", "Entry:", message)
         message = re.sub(r"(?<![A-Za-z])Stop-loss:", "Stop-loss:", message)
         message = re.sub(r"(?<![A-Za-z])Objetivos:", "Targets:", message)
@@ -103,15 +103,15 @@ def localize_notification(title: str, message: str, language: Any = "en") -> tup
         "Tu periodo de prueba ha terminado": "Your trial period has ended",
         "Tu suscripción Premium termina pronto": "Your Premium subscription ends soon",
         "Tu suscripción Premium ha terminado": "Your Premium subscription has ended",
-        "Actualización de tu plan FTrade": "FTrade plan update",
-        "Tu periodo de prueba de FTrade termina pronto. Revisa tus opciones de suscripción para mantener el acceso.":
-            "Your FTrade trial ends soon. Review your subscription options to keep access.",
-        "Tu periodo de prueba de FTrade ha terminado. Puedes revisar los planes disponibles desde tu cuenta.":
-            "Your FTrade trial has ended. You can review available plans from your account.",
-        "Tu suscripción Premium de FTrade termina pronto. Revisa tu cuenta para renovarla.":
-            "Your FTrade Premium subscription ends soon. Review your account to renew it.",
-        "Tu periodo Premium de FTrade ha terminado. Puedes revisar las opciones de renovación desde tu cuenta.":
-            "Your FTrade Premium period has ended. You can review renewal options from your account.",
+        "Actualización de tu plan KERYNTIX MARKET DESK": "KERYNTIX MARKET DESK plan update",
+        "Tu periodo de prueba de KERYNTIX MARKET DESK termina pronto. Revisa tus opciones de suscripción para mantener el acceso.":
+            "Your KERYNTIX MARKET DESK trial ends soon. Review your subscription options to keep access.",
+        "Tu periodo de prueba de KERYNTIX MARKET DESK ha terminado. Puedes revisar los planes disponibles desde tu cuenta.":
+            "Your KERYNTIX MARKET DESK trial has ended. You can review available plans from your account.",
+        "Tu suscripción Premium de KERYNTIX MARKET DESK termina pronto. Revisa tu cuenta para renovarla.":
+            "Your KERYNTIX MARKET DESK Premium subscription ends soon. Review your account to renew it.",
+        "Tu periodo Premium de KERYNTIX MARKET DESK ha terminado. Puedes revisar las opciones de renovación desde tu cuenta.":
+            "Your KERYNTIX MARKET DESK Premium period has ended. You can review renewal options from your account.",
         "Una persona invitada mediante tu enlace ha activado Premium.":
             "Someone invited through your referral link has activated Premium.",
         "Un referido activó Premium": "A referral activated Premium",
@@ -122,8 +122,8 @@ def localize_notification(title: str, message: str, language: Any = "en") -> tup
     match = re.match(r"^Has recibido (\d+) días adicionales de Premium por tus referidos\.$", message)
     if match:
         message = f"You received {match.group(1)} additional Premium days from your referrals."
-    match = re.match(r"^Tu periodo Premium de FTrade ha terminado, pero tu periodo de prueba sigue activo hasta (.+)\. Puedes revisar los planes disponibles desde tu cuenta\.$", message)
+    match = re.match(r"^Tu periodo Premium de KERYNTIX MARKET DESK ha terminado, pero tu periodo de prueba sigue activo hasta (.+)\. Puedes revisar los planes disponibles desde tu cuenta\.$", message)
     if match:
-        message = (f"Your FTrade Premium period has ended, but your trial remains active until {match.group(1)}. "
+        message = (f"Your KERYNTIX MARKET DESK Premium period has ended, but your trial remains active until {match.group(1)}. "
                    "You can review available plans from your account.")
     return title, message

@@ -1,4 +1,4 @@
-"""Read-only HTTP endpoints for FTrade signals."""
+"""Read-only HTTP endpoints for KERYNTIX MARKET DESK signals."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status

@@ -174,7 +174,7 @@ def _admin_phone_numbers() -> set[str]:
 
 
 def is_admin_id(user_id: str) -> bool:
-    """Legacy admin check by FTrade's internal user ID."""
+    """Legacy admin check by KERYNTIX MARKET DESK's internal user ID."""
     return str(user_id) in _admin_ids()
 
 
@@ -425,7 +425,7 @@ class AuthService:
         if not updated:
             raise HTTPException(status_code=410, detail={"code": "AUTH_REQUEST_EXPIRED", "message": "La solicitud ya no está disponible."})
         try:
-            self.telegram.send_message(str(challenge["telegram_chat_id"]), f"Tu nuevo código de acceso FTrade es: {code}\nVence en 5 minutos. No lo compartas.")
+            self.telegram.send_message(str(challenge["telegram_chat_id"]), f"Tu nuevo código de acceso KERYNTIX MARKET DESK es: {code}\nVence en 5 minutos. No lo compartas.")
         except TelegramDeliveryError as exc:
             raise HTTPException(status_code=503, detail={"code": "TELEGRAM_DELIVERY_FAILED", "message": "No se pudo enviar el código por Telegram. Inténtalo de nuevo más tarde."}) from exc
         return {"expires_at": iso_utc(code_expiry), "resend_at": iso_utc(new_resend_at)}
