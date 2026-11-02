@@ -1,8 +1,8 @@
-"""Vendored, unmodified strategy logic from the current Telegram bot.
+"""FTrade liquidity-sweep signal strategy.
 
-Source of truth: FTrade-main/app/strategy.py from the user-provided bot archive.
-The scan service calls this module directly so web and bot calculations can be
-compared without reimplementing the strategy rules in a second language.
+The base model is derived from the Telegram bot strategy, with platform-specific
+calibration for balanced LONG/SHORT context checks and a graded EMA alignment
+score. This module is the source of truth for the FTrade web signal scanner.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_2_liquidity_sweep_operational_receptive"
+SCORE_CALIBRATION_VERSION = "v4_3_balanced_directional_context"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -132,52 +132,8 @@ MTF_PREMIUM_PROFILE["filter_profile"] = "plus"
 PROFILES = [MTF_PREMIUM_PROFILE]
 
 
-LONG_DIRECTIONAL_TUNING = {
-    "free": {
-        "min_sweep_atr": 0.04,
-        "min_confirm_rel_volume": 0.06,
-        "min_body_ratio_confirmation": 0.04,
-        "min_close_position": 0.04,
-        "min_rr": 0.10,
-        "htf_required_score": 0,
-        "htf_price_tolerance_mul": 0.96,
-        "htf_trend_tolerance_mul": 0.96,
-    },
-    "plus": {
-        "min_sweep_atr": 0.05,
-        "min_confirm_rel_volume": 0.07,
-        "min_body_ratio_confirmation": 0.05,
-        "min_close_position": 0.05,
-        "min_rr": 0.12,
-        "htf_required_score": 1,
-        "htf_price_tolerance_mul": 0.92,
-        "htf_trend_tolerance_mul": 0.92,
-    },
-    "premium": {
-        "min_sweep_atr": 0.07,
-        "min_confirm_rel_volume": 0.09,
-        "min_body_ratio_confirmation": 0.05,
-        "min_close_position": 0.05,
-        "min_rr": 0.16,
-        "htf_required_score": 1,
-        "htf_price_tolerance_mul": 0.88,
-        "htf_trend_tolerance_mul": 0.88,
-    },
-}
-
-PREMIUM_GLOBAL_TUNING = {
-    "min_rel_volume": 0.03,
-    "min_confirm_rel_volume": 0.04,
-    "min_body_ratio_confirmation": 0.02,
-    "min_close_position": 0.02,
-    "min_rr": 0.05,
-}
-
-LONG_SCORE_FLOOR_BONUS = {
-    "free": 1.0,
-    "plus": 2.0,
-    "premium": 4.0,
-}
+# Directional calibration is shared by LONG and SHORT. The previous LONG-only
+# bonuses made the two sides use different sweep, volume, RR and score floors.
 PREMIUM_SCORE_FLOOR_BONUS = 2.0
 
 
@@ -249,6 +205,11 @@ def _profile_name(profile: Dict) -> str:
 
 
 def _directional_profile(profile: Dict, direction: str) -> Dict:
+    """Apply shared profile calibration to either direction.
+
+    LONG/SHORT no longer receive different volume, sweep, RR or HTF thresholds.
+    A directional check is performed later using mirrored price/EMA conditions.
+    """
     tuned = dict(profile)
     profile_name = _profile_name(profile)
 
@@ -267,42 +228,27 @@ def _directional_profile(profile: Dict, direction: str) -> Dict:
         )
         tuned["min_rr"] = float(tuned["min_rr"]) + PREMIUM_GLOBAL_TUNING["min_rr"]
 
-    if str(direction).upper() == "LONG":
-        direction_tuning = LONG_DIRECTIONAL_TUNING.get(profile_name, {})
-        tuned["min_sweep_atr"] = float(tuned["min_sweep_atr"]) + float(direction_tuning.get("min_sweep_atr", 0.0))
-        tuned["min_confirm_rel_volume"] = float(tuned["min_confirm_rel_volume"]) + float(direction_tuning.get("min_confirm_rel_volume", 0.0))
-        tuned["min_body_ratio_confirmation"] = breakout._clamp(
-            float(tuned["min_body_ratio_confirmation"]) + float(direction_tuning.get("min_body_ratio_confirmation", 0.0)),
-            0.0,
-            0.95,
-        )
-        tuned["min_close_position"] = breakout._clamp(
-            float(tuned["min_close_position"]) + float(direction_tuning.get("min_close_position", 0.0)),
-            0.0,
-            0.97,
-        )
-        tuned["min_rr"] = float(tuned["min_rr"]) + float(direction_tuning.get("min_rr", 0.0))
-        tuned["htf_required_score"] = max(
-            int(tuned.get("htf_required_score", 1)),
-            int(profile.get("htf_required_score", 1)) + int(direction_tuning.get("htf_required_score", 0)),
-        )
-        tuned["htf_price_tolerance"] = max(0.0, float(tuned["htf_price_tolerance"]) * float(direction_tuning.get("htf_price_tolerance_mul", 1.0)))
-        tuned["htf_trend_tolerance"] = max(0.0, float(tuned["htf_trend_tolerance"]) * float(direction_tuning.get("htf_trend_tolerance_mul", 1.0)))
-
     return tuned
 
 
 def _directional_min_raw_score(profile_name: str, direction: str) -> float:
+    """Return one score floor for both directions within the same plan."""
     minimum = _min_raw_score_for_profile(profile_name)
-    normalized_profile = str(profile_name or "").strip().lower()
-    if normalized_profile == "premium":
+    if str(profile_name or "").strip().lower() == "premium":
         minimum += PREMIUM_SCORE_FLOOR_BONUS
-    if str(direction).upper() == "LONG":
-        minimum += float(LONG_SCORE_FLOOR_BONUS.get(normalized_profile, 0.0))
     return float(minimum)
 
 
 def _directional_context_ok(df: pd.DataFrame, direction: str, profile: Dict) -> bool:
+    """Check short-term directional follow-through symmetrically for LONG/SHORT.
+
+    The former implementation applied a three-of-four gate to PLUS LONG setups,
+    but bypassed this check entirely for PLUS SHORT setups. That asymmetry could
+    admit weak shorts while rejecting otherwise comparable longs. The revised
+    check mirrors the conditions and uses a two-of-four threshold for the active
+    Free/Plus signal profile, preserving opportunities while requiring evidence
+    from more than one market-context input.
+    """
     if df is None or df.empty or len(df) < 2:
         return True
 
@@ -319,24 +265,28 @@ def _directional_context_ok(df: pd.DataFrame, direction: str, profile: Dict) -> 
     ema20 = float(last["ema20"])
     prev_ema20 = float(prev["ema20"])
     rel_volume = float(last.get("rel_volume") or 0.0)
+    volume_floor = float(profile.get("min_confirm_rel_volume", 0.0))
+
+    # Keep the tolerance symmetric: a small EMA drift should not veto a setup.
+    ema_tolerance = 0.001 if profile_name == "free" else 0.0005
+    price_tolerance = 0.001 if profile_name == "free" else 0.0
 
     if str(direction).upper() == "SHORT":
-        if profile_name != "premium":
-            return True
         checks = [
-            close <= (ema20 * 1.002),
-            close <= (prev_close * 1.002) or low <= prev_low,
-            rel_volume >= float(profile.get("min_confirm_rel_volume", 0.0)),
+            close <= ema20 * (1.0 + price_tolerance),
+            ema20 <= prev_ema20 * (1.0 + ema_tolerance),
+            close <= prev_close * (1.0 + price_tolerance) or low <= prev_low,
+            rel_volume >= volume_floor,
         ]
-        return sum(bool(flag) for flag in checks) >= 2
+    else:
+        checks = [
+            close >= ema20 * (1.0 - price_tolerance),
+            ema20 >= prev_ema20 * (1.0 - ema_tolerance),
+            close >= prev_close * (1.0 - price_tolerance) or high >= prev_high,
+            rel_volume >= volume_floor,
+        ]
 
-    checks = [
-        close >= (ema20 * (0.999 if profile_name == "free" else 1.0)),
-        ema20 >= (prev_ema20 * (0.999 if profile_name == "free" else 0.9995 if profile_name == "plus" else 1.0)),
-        close >= (prev_close * (0.999 if profile_name == "free" else 1.0)) or high >= prev_high,
-        rel_volume >= float(profile.get("min_confirm_rel_volume", 0.0)),
-    ]
-    required = 2 if profile_name == "free" else 3
+    required = 3 if profile_name == "premium" else 2
     return sum(bool(flag) for flag in checks) >= required
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -807,20 +757,54 @@ def _component(name: str, points: float, value: float, passed: bool) -> Dict:
 
 
 
-def _score_components(last: pd.Series, direction: str, zone: Dict, sweep: Dict, barrier_rr: float, profile: Dict) -> List[Dict]:
+def _score_components(
+    last: pd.Series,
+    direction: str,
+    zone: Dict,
+    sweep: Dict,
+    barrier_rr: float,
+    profile: Dict,
+    *,
+    trend_reference: Optional[pd.Series] = None,
+) -> List[Dict]:
+    """Score setup quality with a real EMA-stack measurement, not a free pass.
+
+    The trigger candle still supplies recovery/volume/close-position metrics. The
+    15m structure candle (when available) is used for the EMA stack so a 5m tick
+    does not masquerade as higher-timeframe trend confirmation.
+    """
     rel_volume = float(last.get("rel_volume") or 0.0)
     body_ratio = float(last.get("body_ratio") or 0.0)
     close_position = float(last.get("close_position") or 0.0)
     confirmation_volume_ok = rel_volume >= float(profile["min_confirm_rel_volume"])
     close_pos_value = close_position if direction == "LONG" else (1.0 - close_position)
 
+    trend = trend_reference if trend_reference is not None else last
+    trend_close = float(trend.get("close", last["close"]))
+    ema20 = float(trend.get("ema20", trend_close))
+    ema50 = float(trend.get("ema50", ema20))
+    if str(direction).upper() == "LONG":
+        reclaimed = trend_close >= ema20
+        stacked = reclaimed and ema20 >= ema50
+    else:
+        reclaimed = trend_close <= ema20
+        stacked = reclaimed and ema20 <= ema50
+    # Keep the existing 10-point budget, but award all of it only when the
+    # 15m EMA20/EMA50 stack agrees. A valid reclaim against the larger trend
+    # receives partial credit rather than an automatic 10 points.
+    ema_points = 10.0 if stacked else 5.0 if reclaimed else 0.0
+
+    sweep_distance = float(sweep.get("sweep_distance_atr") or 0.0)
+    min_sweep = float(profile["min_sweep_atr"])
+    sweep_points = 18.0 if sweep_distance >= min_sweep * 1.5 else 15.0
+
     return [
         _component("liquidity_zone", 18.0, float(zone.get("count") or 0.0), float(zone.get("count") or 0.0) >= 1.0),
-        _component("minimum_sweep", 18.0, float(sweep.get("sweep_distance_atr") or 0.0), float(sweep.get("sweep_distance_atr") or 0.0) >= float(profile["min_sweep_atr"])),
+        _component("minimum_sweep", sweep_points, sweep_distance, sweep_distance >= min_sweep),
         _component("recovery_close", 16.0, body_ratio, body_ratio >= float(profile["min_body_ratio_recovery"])),
         _component("confirmation_volume", 14.0, rel_volume, confirmation_volume_ok),
         _component("close_position", 12.0, close_pos_value, close_pos_value >= float(profile["min_close_position"])),
-        _component("ema_reclaim", 10.0, float(last["close"]), True),
+        _component("ema_reclaim", ema_points, trend_close, reclaimed),
         _component("barrier_room_rr", 12.0, barrier_rr, barrier_rr >= float(profile["min_rr"])),
     ]
 
@@ -929,7 +913,7 @@ def _evaluate_direction(
         reject("liquidity_barrier_room")
         return None
 
-    components = _score_components(last, direction, zone, sweep, barrier_rr, tuned_profile)
+    components = _score_components(last, direction, zone, sweep, barrier_rr, tuned_profile, trend_reference=last)
     raw_score = _sum_components(components)
     if raw_score < _directional_min_raw_score(_profile_name(tuned_profile), direction):
         reject("liquidity_score_floor")
@@ -1246,7 +1230,7 @@ def _evaluate_direction_5m_execution(
         reject("liquidity_barrier_room")
         return None
 
-    components = _score_components(trigger_last, direction, zone, sweep, barrier_rr, tuned_profile)
+    components = _score_components(trigger_last, direction, zone, sweep, barrier_rr, tuned_profile, trend_reference=structure_last)
     raw_score = _sum_components(components)
     if raw_score < _directional_min_raw_score(_profile_name(tuned_profile), direction):
         reject("liquidity_score_floor")
