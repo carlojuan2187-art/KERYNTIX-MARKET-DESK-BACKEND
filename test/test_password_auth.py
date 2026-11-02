@@ -19,7 +19,7 @@ def _verify_telegram_for_challenge(client: TestClient, repo, response, *, telegr
         contact_user_id=telegram_user_id,
         chat_id=chat_id,
         contact_phone=str(challenge["phone"]),
-        username="ftrade_tester",
+        username="keryntix_market_desk_tester",
     )
     assert linked["code"]
     return token, linked["code"]

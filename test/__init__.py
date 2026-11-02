@@ -1,1 +1,1 @@
-"""FTrade backend automated test package."""
+"""KERYNTIX MARKET DESK backend automated test package."""

@@ -24,7 +24,7 @@ class FakeRest:
 
 class FakeTelegram:
     def bot_username(self):
-        return "ftrade_phase22_test_bot"
+        return "keryntix_market_desk_phase_test_bot"
 
     def is_configured(self):
         return True

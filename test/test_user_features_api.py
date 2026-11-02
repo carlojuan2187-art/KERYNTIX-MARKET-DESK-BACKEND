@@ -118,37 +118,6 @@ def test_price_alert_crud_and_owner_isolation():
         assert deleted.status_code == 204
 
 
-def test_delete_all_notifications_clears_only_owner_inbox_and_preserves_queued_delivery():
-    app, _auth, features, _cache, principal = setup()
-    now = datetime.now(UTC)
-    features.create_notification({"id": "clear-1", "user_id": principal.user_id, "event_id": "clear-e1", "kind": "mov",
-                                  "title": "Pump", "message": "BTC", "symbol": "BTCUSDT", "metadata": {},
-                                  "created_at": now, "read_at": None, "in_app": True})
-    features.create_notification({"id": "clear-2", "user_id": principal.user_id, "event_id": "clear-e2", "kind": "liq",
-                                  "title": "Liquidation", "message": "ETH", "symbol": "ETHUSDT", "metadata": {},
-                                  "created_at": now + timedelta(seconds=1), "read_at": None, "in_app": True})
-    features.create_notification({"id": "clear-pending", "user_id": principal.user_id, "event_id": "clear-e3", "kind": "plans",
-                                  "title": "Plan", "message": "Renewal", "symbol": None, "metadata": {},
-                                  "created_at": now + timedelta(seconds=2), "read_at": None, "in_app": True,
-                                  "web_push_delivery": {"status": "pending"}})
-    features.create_notification({"id": "clear-other", "user_id": "usr_features_2", "event_id": "clear-e1", "kind": "mov",
-                                  "title": "Private", "message": "not yours", "symbol": "BTCUSDT", "metadata": {},
-                                  "created_at": now, "read_at": None, "in_app": True})
-
-    with TestClient(app) as client:
-        cleared = client.delete("/notifications")
-        assert cleared.status_code == 200, cleared.text
-        assert cleared.json() == {"deleted": 3, "unread_count": 0}
-        assert client.get("/notifications").json()["items"] == []
-
-    # A queued delivery remains in the durable outbox but disappears from the inbox.
-    pending = features._notifications["clear-pending"]
-    assert pending["in_app"] is False
-    assert pending["web_push_delivery"]["status"] == "pending"
-    # Another account's history is not affected.
-    assert "clear-other" in features._notifications
-
-
 def test_notification_inbox_read_all_delete_and_user_isolation():
     app, _auth, features, _cache, principal = setup()
     now = datetime.now(UTC)

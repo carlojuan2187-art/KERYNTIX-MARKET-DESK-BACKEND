@@ -285,10 +285,10 @@ def test_new_signal_notifications_follow_each_users_language_preference():
     english = features.list_notifications("signals-english")[0]
     spanish = features.list_notifications("signals-spanish")[0]
     assert english["title"] == "New LONG signal · BTCUSDT"
-    assert "FTrade published a new LONG signal" in english["message"]
+    assert "KERYNTIX MARKET DESK published a new LONG signal" in english["message"]
     assert "New LONG signal" in english["telegram_delivery"]["text"]
     assert spanish["title"] == "Nueva señal LONG · BTCUSDT"
-    assert "FTrade publicó una nueva señal" in spanish["message"]
+    assert "KERYNTIX MARKET DESK publicó una nueva señal" in spanish["message"]
     assert "Nueva señal LONG" in spanish["telegram_delivery"]["text"]
 
 

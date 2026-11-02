@@ -26,7 +26,7 @@ class FakeHttpClient:
 
 def test_auth_bot_stop_event_exits_without_polling_and_closes_resources():
     repository = FakeRepository()
-    bot = TelegramAuthBot(repository, "123456:abcdefghijklmnopqrstuvwxyzABCDE123456", username="ftrade_test_bot")
+    bot = TelegramAuthBot(repository, "123456:abcdefghijklmnopqrstuvwxyzABCDE123456", username="keryntix_market_desk_test_bot")
     client = FakeHttpClient()
     bot.client.close()
     bot.client = client
@@ -52,7 +52,7 @@ def test_auth_bot_accepts_registration_challenge_on_verify_deep_link():
         "consumed": False,
     })
     bot = TelegramAuthBot(
-        repository, "123456:abcdefghijklmnopqrstuvwxyzABCDE123456", username="ftrade_test_bot"
+        repository, "123456:abcdefghijklmnopqrstuvwxyzABCDE123456", username="keryntix_market_desk_test_bot"
     )
     sent = []
     bot.send = lambda chat_id, text, reply_markup=None: sent.append((str(chat_id), text, reply_markup))

@@ -20,7 +20,7 @@ class FakeTelegram:
         return None
 
     def bot_username(self):
-        return "ftrade_test_bot"
+        return "keryntix_market_desk_test_bot"
 
     def is_configured(self):
         return True
@@ -55,7 +55,7 @@ def _configure_production(monkeypatch):
     monkeypatch.setenv("AUTH_CODE_PEPPER", "b" * 48)
     monkeypatch.setenv("ADMIN_USER_IDS", "usr_admin_test")
     monkeypatch.setenv("TELEGRAM_AUTH_BOT_TOKEN", "123456:abcdefghijklmnopqrstuvwxyzABCDE123456")
-    monkeypatch.setenv("TELEGRAM_AUTH_BOT_USERNAME", "ftrade_prod_bot")
+    monkeypatch.setenv("TELEGRAM_AUTH_BOT_USERNAME", "keryntix_market_desk_prod_bot")
     monkeypatch.setenv("PAYMENT_WALLET_ADDRESS", "0x1111111111111111111111111111111111111111")
     monkeypatch.setenv("USDT_BEP20_CONTRACT", "0x55d398326f99059fF775485246999027B3197955")
     monkeypatch.setenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org")

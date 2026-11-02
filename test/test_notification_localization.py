@@ -4,18 +4,18 @@ from api.services.localization import localize_notification
 def test_new_signal_notification_is_localized_for_english_users():
     title, message = localize_notification(
         "Nueva señal LONG · BTCUSDT",
-        "FTrade publicó una nueva señal LONG para BTCUSDT.\nEntrada: 104,000 · Stop-loss: 102,000 · Objetivos: 106,000 / 108,000 · Score: 87.0/100",
+        "KERYNTIX MARKET DESK publicó una nueva señal LONG para BTCUSDT.\nEntrada: 104,000 · Stop-loss: 102,000 · Objetivos: 106,000 / 108,000 · Score: 87.0/100",
         "en",
     )
     assert title == "New LONG signal · BTCUSDT"
-    assert "FTrade published a new LONG signal for BTCUSDT." in message
+    assert "KERYNTIX MARKET DESK published a new LONG signal for BTCUSDT." in message
     assert "Entry: 104,000" in message
     assert "Targets: 106,000 / 108,000" in message
 
 
 def test_new_signal_notification_remains_spanish_for_spanish_users():
     title = "Nueva señal SHORT · ETHUSDT"
-    message = "FTrade publicó una nueva señal SHORT para ETHUSDT.\nEntrada: 3,000"
+    message = "KERYNTIX MARKET DESK publicó una nueva señal SHORT para ETHUSDT.\nEntrada: 3,000"
     assert localize_notification(title, message, "es") == (title, message)
 
 

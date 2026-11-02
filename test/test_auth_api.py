@@ -12,7 +12,7 @@ from main import create_app
 
 
 class FakeTelegram:
-    def __init__(self, username="ftrade_auth_test"):
+    def __init__(self, username="keryntix_market_desk_auth_test"):
         self.username = username
         self.sent = []
 
@@ -29,7 +29,7 @@ class FakeRest:
 
 
 def configured(monkeypatch, repo=None, telegram=None):
-    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-ftrade-phase-five")
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-keryntix-phase-five")
     monkeypatch.setenv("AUTH_CODE_PEPPER", "test-code-pepper-for-phase-five")
     monkeypatch.setenv("ACCESS_TOKEN_MAX_TTL_SECONDS", "900")
     monkeypatch.setenv("TRIAL_DAYS", "5")
@@ -59,7 +59,7 @@ def challenge_and_link(client, repo, phone="+17875551234", telegram_user_id="424
         contact_user_id=telegram_user_id,
         chat_id=chat_id,
         contact_phone=phone,
-        username="ftrade_tester",
+        username="keryntix_market_desk_tester",
     )
     return token, linked["code"]
 
@@ -264,7 +264,7 @@ def test_telegram_link_flow_requires_same_registered_phone(monkeypatch):
         assert removed.json()["telegram_chat_id"] is None
         link = client.post("/account/telegram", headers=headers)
         assert link.status_code == 200, link.text
-        assert link.json()["deep_link"].startswith("https://t.me/ftrade_auth_test?start=link_")
+        assert link.json()["deep_link"].startswith("https://t.me/keryntix_market_desk_auth_test?start=link_")
         token = link.json()["token"]
         request_doc = repo.get_auth_request(hash_token(token))
         try:
@@ -277,7 +277,7 @@ def test_telegram_link_flow_requires_same_registered_phone(monkeypatch):
             assert str(exc) == "PHONE_MISMATCH"
         linked = handle_telegram_contact(
             repo, token_hash=request_doc["token_hash"], sender_user_id="4242", contact_user_id="4242",
-            chat_id="4242", contact_phone="+17875551234", username="ftrade_tester",
+            chat_id="4242", contact_phone="+17875551234", username="keryntix_market_desk_tester",
         )
         assert linked["flow"] == "link"
         assert linked["code"] is None
@@ -325,7 +325,7 @@ def test_production_rejects_legacy_tokens_without_persisted_session(monkeypatch)
     import time
 
     monkeypatch.setenv("FTRADE_ENV", "production")
-    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-ftrade-phase-five")
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-keryntix-phase-five")
     monkeypatch.setenv("ADMIN_USER_IDS", "")
     def enc(value: bytes) -> str:
         return base64.urlsafe_b64encode(value).rstrip(b"=").decode()
@@ -333,7 +333,7 @@ def test_production_rejects_legacy_tokens_without_persisted_session(monkeypatch)
     header = enc(json.dumps({"alg": "HS256", "typ": "JWT"}, separators=(",", ":")).encode())
     claims = enc(json.dumps({"sub": "not-an-admin", "iat": now, "exp": now + 120, "is_admin": True, "banned": True}).encode())
     body = f"{header}.{claims}"
-    signature = enc(hmac.new(b"test-secret-for-ftrade-phase-five", body.encode(), hashlib.sha256).digest())
+    signature = enc(hmac.new(b"test-secret-for-keryntix-phase-five", body.encode(), hashlib.sha256).digest())
     token = f"{body}.{signature}"
     app = create_app(
         InMemorySignalRepository([]), market_cache=InMemoryJsonCache(), market_rest_client=FakeRest(),
@@ -348,7 +348,7 @@ def test_production_rejects_legacy_tokens_without_persisted_session(monkeypatch)
 def test_auth_route_refuses_placeholder_telegram_configuration(monkeypatch):
     from api.services.telegram import TelegramBotAPI
 
-    monkeypatch.setenv("TELEGRAM_AUTH_BOT_USERNAME", "your_new_ftrade_auth_bot")
+    monkeypatch.setenv("TELEGRAM_AUTH_BOT_USERNAME", "your_keryntix_market_desk_auth_bot")
     gateway = TelegramBotAPI(token="replace-with-a-dedicated-bot-token")
     app = create_app(
         InMemorySignalRepository([]), market_cache=InMemoryJsonCache(), market_rest_client=FakeRest(),

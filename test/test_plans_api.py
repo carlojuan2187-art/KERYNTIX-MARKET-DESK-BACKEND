@@ -15,7 +15,7 @@ UTC = timezone.utc
 
 class FakeTelegram:
     def bot_username(self):
-        return "ftrade_auth_test"
+        return "keryntix_market_desk_auth_test"
 
     def is_configured(self):
         return True
@@ -30,7 +30,7 @@ class FakeRest:
 
 
 def setup_api(monkeypatch, *, trial_end, is_admin=False):
-    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-ftrade-plans-phase-ten")
+    monkeypatch.setenv("ACCESS_TOKEN_SECRET", "test-secret-for-keryntix-plans-phase-ten")
     monkeypatch.setenv("AUTH_CODE_PEPPER", "test-code-pepper-for-plans-phase-ten")
     monkeypatch.setenv("FTRADE_ENV", "development")
     user_id = "usr_plan_api_admin" if is_admin else "usr_plan_api_user"
