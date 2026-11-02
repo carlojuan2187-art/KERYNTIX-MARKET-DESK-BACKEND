@@ -41,6 +41,16 @@ def _clean(doc: Any) -> dict[str, Any] | None:
     return out
 
 
+def _notification_has_pending_delivery(row: Mapping[str, Any]) -> bool:
+    """Whether deleting an inbox item must preserve an in-flight outbox job."""
+    pending = {"pending", "retry", "sending"}
+    for channel in ("telegram_delivery", "web_push_delivery"):
+        delivery = row.get(channel)
+        if isinstance(delivery, Mapping) and str(delivery.get("status") or "").lower() in pending:
+            return True
+    return False
+
+
 class UserFeatureRepository(Protocol):
     def create_price_alert(self, document: Mapping[str, Any]) -> dict[str, Any]: ...
     def get_price_alert(self, alert_id: str, user_id: str) -> dict[str, Any] | None: ...
@@ -70,6 +80,7 @@ class UserFeatureRepository(Protocol):
     def mark_notification_read(self, notification_id: str, user_id: str, *, now: datetime) -> dict[str, Any] | None: ...
     def mark_all_notifications_read(self, user_id: str, *, now: datetime) -> int: ...
     def delete_notification(self, notification_id: str, user_id: str) -> bool: ...
+    def delete_all_notifications(self, user_id: str) -> int: ...
     def health(self) -> dict[str, Any]: ...
     def close(self) -> None: ...
 
@@ -401,15 +412,31 @@ class InMemoryUserFeatureRepository:
             row = self._notifications.get(str(notification_id))
             if not row or str(row.get("user_id")) != str(user_id):
                 return False
-            delivery = row.get("telegram_delivery")
-            if isinstance(delivery, dict) and delivery.get("status") in {"pending", "retry", "sending"}:
-                # Hiding an inbox item must not discard its durable Telegram job.
+            if _notification_has_pending_delivery(row):
+                # Hiding an inbox item must not discard a durable channel job.
                 row["in_app"] = False
                 row["deleted_at"] = _now()
                 return True
             self._notifications.pop(str(notification_id), None)
             self._notification_keys.pop((str(user_id), str(row.get("event_id"))), None)
             return True
+
+    def delete_all_notifications(self, user_id: str) -> int:
+        """Clear this user's in-app inbox without cancelling queued deliveries."""
+        removed = 0
+        now = _now()
+        with self._lock:
+            for notification_id, row in list(self._notifications.items()):
+                if str(row.get("user_id")) != str(user_id) or not row.get("in_app", True):
+                    continue
+                removed += 1
+                if _notification_has_pending_delivery(row):
+                    row["in_app"] = False
+                    row["deleted_at"] = now
+                    continue
+                self._notifications.pop(notification_id, None)
+                self._notification_keys.pop((str(user_id), str(row.get("event_id"))), None)
+        return removed
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "adapter": "memory", "persistent": False}
@@ -712,14 +739,39 @@ class MongoUserFeatureRepository:
         row = self._notifications.find_one({"id": str(notification_id), "user_id": str(user_id)})
         if not row:
             return False
-        delivery = row.get("telegram_delivery")
-        if isinstance(delivery, Mapping) and delivery.get("status") in {"pending", "retry", "sending"}:
+        if _notification_has_pending_delivery(row):
             result = self._notifications.update_one(
                 {"id": str(notification_id), "user_id": str(user_id)},
                 {"$set": {"in_app": False, "deleted_at": _now()}},
             )
             return bool(result.modified_count)
         return self._notifications.delete_one({"id": str(notification_id), "user_id": str(user_id)}).deleted_count == 1
+
+    def delete_all_notifications(self, user_id: str) -> int:
+        """Clear the in-app inbox but keep queued Telegram/Web Push work durable."""
+        pending_statuses = ["pending", "retry", "sending"]
+        inbox_query = {"user_id": str(user_id), "in_app": {"$ne": False}}
+        pending_query = {
+            **inbox_query,
+            "$or": [
+                {"telegram_delivery.status": {"$in": pending_statuses}},
+                {"web_push_delivery.status": {"$in": pending_statuses}},
+            ],
+        }
+        now = _now()
+        hidden = self._notifications.update_many(
+            pending_query,
+            {"$set": {"in_app": False, "deleted_at": now}},
+        )
+        removable_query = {
+            **inbox_query,
+            "$nor": [
+                {"telegram_delivery.status": {"$in": pending_statuses}},
+                {"web_push_delivery.status": {"$in": pending_statuses}},
+            ],
+        }
+        deleted = self._notifications.delete_many(removable_query)
+        return int(hidden.modified_count) + int(deleted.deleted_count)
 
     def health(self) -> dict[str, Any]:
         try:
