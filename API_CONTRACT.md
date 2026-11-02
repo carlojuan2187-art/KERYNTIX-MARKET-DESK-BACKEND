@@ -146,13 +146,14 @@ Decisiones explícitas de cálculo: riesgo = capital _ riesgo / 100; cantidad = 
 | `GET /notifications?unread_only=false&limit=50&before=...` | Parámetros opcionales | `{items,unread_count,limit,next_before}` | 401 sesión |
 | `POST /notifications/{id}/read` | ID | `{id,read_at,unread_count}` | 404 notificación |
 | `POST /notifications/read-all` | Sin body | `{updated,unread_count}` | 401 sesión |
-| `DELETE /notifications/{id}` | ID | 204 | 404 notificación |
+| `DELETE /notifications` | Sin body | `{deleted,unread_count}`; elimina el historial del centro del usuario autenticado y conserva los envíos de Telegram/Web Push que estén pendientes | 401 sesión |
+| `DELETE /notifications/{id}` | ID | 204; elimina u oculta del centro la notificación propia | 404 notificación |
 | `GET /push/vapid-public-key` | Sin body; endpoint público | `{public_key,application_server_key}` | 503 VAPID no configurado |
 | `GET /push/subscriptions` | Sesión actual | `{items,total,max_items}`; no expone endpoint ni claves | 401 sesión |
 | `POST /push/subscriptions` | Objeto `subscription.toJSON()` con `endpoint`, `expirationTime?`, `keys.p256dh`, `keys.auth` | Metadata sanitizada de suscripción | 422 endpoint/keys inválidos o expirados; 409 límite de navegadores |
 | `DELETE /push/subscriptions/{id}` | ID propio | 204 | 404 suscripción ajena/inexistente |
 
-`AlertItem = {id,kind:"liq"|"mov"|"vol",key,text,symbol?,focus?,created_at}`. `AppNotification = {id,title,text,created_at,read,href}`. Abrir un aviso lo marca como leído sin borrarlo. Los eventos de señales y avisos se conservan en el centro.
+`AlertItem = {id,kind:"liq"|"mov"|"vol",key,text,symbol?,focus?,created_at}`. `AppNotification = {id,title,text,created_at,read,href}`. Abrir un aviso lo marca como leído sin borrarlo. El usuario puede borrar una notificación concreta o limpiar todo el historial del centro; los trabajos de entrega que sigan pendientes por Telegram/Web Push se conservan internamente y dejan de mostrarse en el centro.
 
 Máximo 8 avisos de anomalías por hora y no repetir par en 45 minutos salvo magnitud duplicada. La demo usa magnitud fija y suprime todas las repeticiones dentro del plazo. Los avisos emergentes duran `VITE_ALERT_DURATION_SECONDS` (180 por defecto); los eventos de señales, 7s. Un usuario bloqueado o sin acceso no recibe avisos de mercado ni de señales.
 
