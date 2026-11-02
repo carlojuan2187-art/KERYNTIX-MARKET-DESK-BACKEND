@@ -146,6 +146,7 @@ Decisiones explícitas de cálculo: riesgo = capital _ riesgo / 100; cantidad = 
 | `GET /notifications?unread_only=false&limit=50&before=...` | Parámetros opcionales | `{items,unread_count,limit,next_before}` | 401 sesión |
 | `POST /notifications/{id}/read` | ID | `{id,read_at,unread_count}` | 404 notificación |
 | `POST /notifications/read-all` | Sin body | `{updated,unread_count}` | 401 sesión |
+| `DELETE /notifications` | Sin body | `{deleted,unread_count}`; elimina el historial propio del centro de notificaciones y conserva en segundo plano los envíos pendientes de Telegram/Web Push | 401 sesión |
 | `DELETE /notifications/{id}` | ID | 204 | 404 notificación |
 | `GET /push/vapid-public-key` | Sin body; endpoint público | `{public_key,application_server_key}` | 503 VAPID no configurado |
 | `GET /push/subscriptions` | Sesión actual | `{items,total,max_items}`; no expone endpoint ni claves | 401 sesión |
