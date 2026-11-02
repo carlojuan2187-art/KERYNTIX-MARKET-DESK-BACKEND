@@ -463,3 +463,7 @@ class NotificationService:
     def delete(self, user_id: str, notification_id: str) -> None:
         if not self.features.delete_notification(str(notification_id), str(user_id)):
             raise _http("NOTIFICATION_NOT_FOUND", 404, "La notificación no existe.")
+
+    def delete_all(self, user_id: str) -> dict[str, int]:
+        deleted = self.features.delete_all_notifications(str(user_id))
+        return {"deleted": deleted, "unread_count": self.features.unread_count(str(user_id))}
