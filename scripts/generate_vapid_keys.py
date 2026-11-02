@@ -1,4 +1,4 @@
-"""Generate a P-256 VAPID key pair for FTrade Web Push.
+"""Generate a P-256 VAPID key pair for KERYNTIX MARKET DESK Web Push.
 
 Writes the private PEM to a local file with mode 0600 and prints only the public key.
 Never commit the generated private key file.

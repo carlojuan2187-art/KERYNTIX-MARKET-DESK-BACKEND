@@ -1,1 +1,1 @@
-"""Background workers for FTrade Web."""
+"""Background workers for KERYNTIX MARKET DESK."""

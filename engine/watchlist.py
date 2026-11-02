@@ -1,6 +1,6 @@
 """Pure watchlist normalization and multi-timeframe conviction score.
 
-The score logic is ported from FTrade bot app/watchlist.py. It is informational
+The score logic is ported from KERYNTIX MARKET DESK bot app/watchlist.py. It is informational
 only and never creates, filters or modifies trading signals.
 """
 from __future__ import annotations

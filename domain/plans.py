@@ -37,7 +37,7 @@ def iso_utc(value: datetime | None) -> str | None:
 
 
 def evaluate_access(user: Mapping[str, Any], *, now: datetime | None = None, is_admin: bool = False) -> dict[str, Any]:
-    """Resolve the current entitlement using the original FTrade access rule.
+    """Resolve the current entitlement using the original KERYNTIX MARKET DESK access rule.
 
     Administrators are authorized by server-side configuration and bypass plan
     and ban gates. Non-admin users are blocked by an active ban; otherwise they

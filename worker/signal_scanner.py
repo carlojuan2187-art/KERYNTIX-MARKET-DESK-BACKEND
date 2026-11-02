@@ -1,4 +1,4 @@
-"""Live signal-generation worker for FTrade Web.
+"""Live signal-generation worker for KERYNTIX MARKET DESK.
 
 This worker ports the current bot's scan orchestration around the same strategy
 function. It does not send Telegram notifications; it persists a canonical signal

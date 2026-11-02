@@ -254,8 +254,8 @@ class WebPushDeliveryWorker:
         return {
             "id": notification_id,
             "event_id": event_id,
-            "title": str(row.get("title") or "FTrade")[:120],
-            "body": str(row.get("message") or "Tienes una actualización en FTrade.")[:240],
+            "title": str(row.get("title") or "KERYNTIX MARKET DESK")[:120],
+            "body": str(row.get("message") or "Tienes una actualización en KERYNTIX MARKET DESK.")[:240],
             "icon": "/favicon.svg",
             "badge": "/favicon.svg",
             "tag": f"ftrade:{event_id}"[:120],

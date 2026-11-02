@@ -1,4 +1,4 @@
-"""Offline release preflight for FTrade Web.
+"""Offline release preflight for KERYNTIX MARKET DESK Web.
 
 This command checks code/deployment readiness without connecting to MongoDB,
 Redis, Binance, BSC RPC or Telegram. It is intentionally safe to run in CI and
@@ -257,7 +257,7 @@ def inspect_backend(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Preflight estático de liberación de FTrade Web (no conecta a servicios externos).")
+    parser = argparse.ArgumentParser(description="Preflight estático de liberación de KERYNTIX MARKET DESK Web (no conecta a servicios externos).")
     parser.add_argument("--production", action="store_true", help="Validar variables y dependencias requeridas para producción.")
     parser.add_argument("--json", action="store_true", help="Imprimir el reporte en JSON.")
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1], help="Carpeta backend/ a inspeccionar.")
@@ -268,7 +268,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:
-        print(f"FTrade release preflight — {report['mode']} — Python {report['python']}")
+        print(f"KERYNTIX MARKET DESK release preflight — {report['mode']} — Python {report['python']}")
         for check in report["checks"]:
             print(f"[{check['status'].upper():7}] {check['name']}: {check['detail']}")
         print(f"Resultado: {report['status']} ({report['error_count']} errores, {report['warning_count']} advertencias)")

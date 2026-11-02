@@ -1,4 +1,4 @@
-"""Redis-backed singleton lease for long-running FTrade workers.
+"""Redis-backed singleton lease for long-running KERYNTIX MARKET DESK workers.
 
 A worker is considered active only while it owns a renewable lease. Redis uses
 compare-and-set scripts so a stale process cannot renew or release another

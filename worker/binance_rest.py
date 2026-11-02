@@ -43,7 +43,7 @@ class BinanceRestClient:
                 max_connections=self.max_connections,
                 max_keepalive_connections=max(1, min(self.max_connections, self.max_connections // 2)),
             ),
-            headers={"User-Agent": "FTrade-Web/0.4"},
+            headers={"User-Agent": "Keryntix-Market-Desk/0.4"},
         )
         self._owns_client = client is None
         self._semaphore = asyncio.Semaphore(self.concurrency)

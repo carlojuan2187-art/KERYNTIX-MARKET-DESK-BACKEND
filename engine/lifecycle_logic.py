@@ -1,4 +1,4 @@
-"""Pure signal lifecycle rules ported from the original FTrade Telegram bot.
+"""Pure signal lifecycle rules ported from the original KERYNTIX MARKET DESK Telegram bot.
 
 No database, Telegram, HTTP client or scheduler is imported here. The lifecycle
 worker supplies prices/candles and persists the returned transitions.

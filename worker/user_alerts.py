@@ -1,4 +1,4 @@
-"""Price/global-market alert dispatcher for FTrade Web.
+"""Price/global-market alert dispatcher for KERYNTIX MARKET DESK.
 
 It reads the shared market cache produced by worker.market_feed, persists the
 user inbox, and publishes a Redis event for a future WebSocket/SSE adapter. It
@@ -319,7 +319,7 @@ class UserAlertProcessor:
         if score is not None:
             details.append(f"Score: {score:.1f}/100")
         title = f"Nueva señal {direction} · {symbol}"
-        message = f"FTrade publicó una nueva señal {direction} para {symbol}.\n" + " · ".join(details)
+        message = f"KERYNTIX MARKET DESK publicó una nueva señal {direction} para {symbol}.\n" + " · ".join(details)
         event_id = f"signal-created:{signal_id}"
         metadata = {
             "signal_id": signal_id,

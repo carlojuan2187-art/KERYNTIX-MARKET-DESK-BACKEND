@@ -30,7 +30,7 @@ UTC = timezone.utc
 ET = ZoneInfo("America/New_York")
 
 BLS_ICS_URL = os.getenv("BLS_ICS_URL", "https://www.bls.gov/schedule/news_release/bls.ics")
-BLS_USER_AGENT = os.getenv("BLS_USER_AGENT", "Mozilla/5.0 (compatible; FTradeBot/1.0)")
+BLS_USER_AGENT = os.getenv("BLS_USER_AGENT", "Mozilla/5.0 (compatible; KERYNTIX MARKET DESKBot/1.0)")
 BLS_TIMEOUT = int(os.getenv("BLS_TIMEOUT", "10"))
 BLS_CACHE_SECONDS = max(600, int(os.getenv("BLS_CACHE_SECONDS", "21600")))   # 6 h
 BLS_RETRY_SECONDS = 600                                                      # reintento tras fallo

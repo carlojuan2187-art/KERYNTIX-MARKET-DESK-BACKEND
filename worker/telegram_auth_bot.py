@@ -78,12 +78,12 @@ class TelegramAuthBot:
             return
         flow_prefix, sep, token = argument.partition("_")
         if not sep or flow_prefix not in {"verify", "link"} or not token:
-            self.send(chat_id, "Para verificar tu acceso, abre el enlace de inicio desde la web de FTrade.")
+            self.send(chat_id, "Para verificar tu acceso, abre el enlace de inicio desde la web de KERYNTIX MARKET DESK.")
             return
         token_hash = hash_token(token)
         challenge = self.repository.get_auth_request(token_hash)
         if not challenge:
-            self.send(chat_id, "El enlace no es válido. Vuelve a la web de FTrade y solicita uno nuevo.")
+            self.send(chat_id, "El enlace no es válido. Vuelve a la web de KERYNTIX MARKET DESK y solicita uno nuevo.")
             return
         challenge_flow = str(challenge.get("flow") or "")
         # Registration also uses the public `verify_<token>` deep link. It is a
@@ -99,7 +99,7 @@ class TelegramAuthBot:
             return
         expires = as_utc(challenge.get("link_expires_at"))
         if not expires or expires <= utcnow():
-            self.send(chat_id, "El enlace venció. Vuelve a la web de FTrade y solicita uno nuevo.")
+            self.send(chat_id, "El enlace venció. Vuelve a la web de KERYNTIX MARKET DESK y solicita uno nuevo.")
             return
         updated = self.repository.update_auth_request(token_hash, {
             "pending_chat_id": chat_id,
@@ -107,11 +107,11 @@ class TelegramAuthBot:
             "pending_started_at": utcnow(),
         }, conditions={"contact_verified": False, "link_expires_at_gt": utcnow()})
         if not updated:
-            self.send(chat_id, "La solicitud ya venció o fue utilizada. Solicita una nueva desde FTrade.")
+            self.send(chat_id, "La solicitud ya venció o fue utilizada. Solicita una nueva desde KERYNTIX MARKET DESK.")
             return
         self.send(
             chat_id,
-            "Para continuar con FTrade, comparte tu propio contacto usando el botón de abajo. Debe coincidir con el número que escribiste en la web.",
+            "Para continuar con KERYNTIX MARKET DESK, comparte tu propio contacto usando el botón de abajo. Debe coincidir con el número que escribiste en la web.",
             reply_markup=CONTACT_KEYBOARD,
         )
 
@@ -122,7 +122,7 @@ class TelegramAuthBot:
         chat_id = str(chat.get("id", ""))
         challenge = self.repository.get_pending_request_for_chat(chat_id)
         if not challenge:
-            self.send(chat_id, "No hay una solicitud pendiente para este chat. Abre de nuevo el enlace de FTrade.", reply_markup=REMOVE_KEYBOARD)
+            self.send(chat_id, "No hay una solicitud pendiente para este chat. Abre de nuevo el enlace de KERYNTIX MARKET DESK.", reply_markup=REMOVE_KEYBOARD)
             return
         try:
             result = handle_telegram_contact(
@@ -137,25 +137,25 @@ class TelegramAuthBot:
         except ValueError as exc:
             reason = str(exc)
             messages = {
-                "AUTH_REQUEST_NOT_FOUND": "No encontré esa solicitud. Abre el enlace más reciente de FTrade.",
-                "AUTH_REQUEST_EXPIRED": "La solicitud venció. Vuelve a la web de FTrade y comienza de nuevo.",
+                "AUTH_REQUEST_NOT_FOUND": "No encontré esa solicitud. Abre el enlace más reciente de KERYNTIX MARKET DESK.",
+                "AUTH_REQUEST_EXPIRED": "La solicitud venció. Vuelve a la web de KERYNTIX MARKET DESK y comienza de nuevo.",
                 "CONTACT_OWNER_MISMATCH": "Debes compartir tu propio contacto con el botón de Telegram, no reenviar el contacto de otra persona.",
-                "CONTACT_ATTEMPTS_EXHAUSTED": "Se agotaron los intentos de verificación del contacto. Vuelve a la web de FTrade y solicita un nuevo enlace.",
+                "CONTACT_ATTEMPTS_EXHAUSTED": "Se agotaron los intentos de verificación del contacto. Vuelve a la web de KERYNTIX MARKET DESK y solicita un nuevo enlace.",
                 "PHONE_MISMATCH": "El número compartido no coincide con el que escribiste en la web. Comprueba el número e inténtalo otra vez.",
-                "ACCOUNT_PHONE_MISMATCH": "El teléfono no coincide con esta cuenta de FTrade.",
-                "TELEGRAM_ALREADY_LINKED": "Esta cuenta de Telegram ya está vinculada a otra cuenta de FTrade.",
+                "ACCOUNT_PHONE_MISMATCH": "El teléfono no coincide con esta cuenta de KERYNTIX MARKET DESK.",
+                "TELEGRAM_ALREADY_LINKED": "Esta cuenta de Telegram ya está vinculada a otra cuenta de KERYNTIX MARKET DESK.",
             }
-            self.send(chat_id, messages.get(reason, "No se pudo verificar el contacto. Vuelve a empezar desde la web de FTrade."), reply_markup=CONTACT_KEYBOARD)
+            self.send(chat_id, messages.get(reason, "No se pudo verificar el contacto. Vuelve a empezar desde la web de KERYNTIX MARKET DESK."), reply_markup=CONTACT_KEYBOARD)
             return
         except Exception:
             logger.exception("Fallo verificando contacto de Telegram")
-            self.send(chat_id, "No se pudo completar la verificación. Inténtalo de nuevo desde FTrade.", reply_markup=REMOVE_KEYBOARD)
+            self.send(chat_id, "No se pudo completar la verificación. Inténtalo de nuevo desde KERYNTIX MARKET DESK.", reply_markup=REMOVE_KEYBOARD)
             return
         if result["flow"] == "link":
-            self.send(chat_id, "Telegram quedó vinculado a tu cuenta de FTrade.", reply_markup=REMOVE_KEYBOARD)
+            self.send(chat_id, "Telegram quedó vinculado a tu cuenta de KERYNTIX MARKET DESK.", reply_markup=REMOVE_KEYBOARD)
         else:
             code = str(result["code"])
-            self.send(chat_id, f"Tu código de acceso FTrade es: {code}\nVence en 5 minutos. No lo compartas.", reply_markup=REMOVE_KEYBOARD)
+            self.send(chat_id, f"Tu código de acceso KERYNTIX MARKET DESK es: {code}\nVence en 5 minutos. No lo compartas.", reply_markup=REMOVE_KEYBOARD)
 
     def process_update(self, update: dict[str, Any]) -> None:
         message = update.get("message")
@@ -168,11 +168,11 @@ class TelegramAuthBot:
         elif isinstance(message.get("contact"), dict):
             self._contact(message)
         elif message.get("chat"):
-            self.send(str(message["chat"].get("id", "")), "Abre el enlace de verificación desde FTrade para continuar.")
+            self.send(str(message["chat"].get("id", "")), "Abre el enlace de verificación desde KERYNTIX MARKET DESK para continuar.")
 
     def run_forever(self, stop_event: threading.Event | None = None) -> None:
         """Run polling until a stop event is signalled; close resources on every exit."""
-        logger.info("Iniciando bot mínimo de autenticación FTrade; username=%s", self.username or "no configurado")
+        logger.info("Iniciando bot mínimo de autenticación KERYNTIX MARKET DESK; username=%s", self.username or "no configurado")
         try:
             while stop_event is None or not stop_event.is_set():
                 try:

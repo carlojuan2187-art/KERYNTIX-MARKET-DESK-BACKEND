@@ -1,4 +1,4 @@
-"""Canonical FTrade signal/result schemas and legacy bot adapters.
+"""Canonical KERYNTIX MARKET DESK signal/result schemas and legacy bot adapters.
 
 Python target: 3.11+. Pydantic 2.x.
 This module is deliberately independent from Telegram, MongoDB and market I/O.

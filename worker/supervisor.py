@@ -1,4 +1,4 @@
-"""Run the eight FTrade background workers in one deployable worker service.
+"""Run the eight KERYNTIX MARKET DESK background workers in one deployable worker service.
 
 Each child remains an independent process and owns its own Redis lease. This keeps
 failure isolation while avoiding the need to create one Railway service per worker.
