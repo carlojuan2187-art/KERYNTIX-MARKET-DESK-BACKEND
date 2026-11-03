@@ -13,7 +13,7 @@ def _result(idx, result, r_real, closed_at):
     return {
         "id": f"signal-{idx}", "signal_id": f"signal-{idx}", "symbol": "BTCUSDT",
         "direction": "LONG", "entry_fill": 100.0, "result": result,
-        "r_real": r_real, "closed_at": closed_at,
+        "r_real": r_real, "risk": 2.0, "closed_at": closed_at,
         "touched_at": closed_at - timedelta(minutes=4), **exit_levels,
     }
 
@@ -37,6 +37,8 @@ def test_performance_counts_only_closed_results_and_builds_curve():
     assert result["curve"][-1]["r"] == 2.0
     assert result["trades"][0]["id"] == "signal-3"  # newest first for the table
     assert result["trades"][0]["exit_price"] == 104.0
+    assert result["trades"][0]["risk_distance"] == 2.0
+    assert result["trades"][0]["risk_pct"] == 2.0
     assert result["trades"][-1]["exit_price"] == 102.0
 
 
@@ -112,7 +114,7 @@ def test_performance_prefers_explicit_simulated_exit_and_counts_legacy_snapshots
     assert trade_by_id["signal-1"]["exit_via"] == "TP1_PROTECTIVE_STOP_LIVE_PRICE"
     assert trade_by_id["signal-2"]["calculation_version"] == "legacy_v1"
     assert result["legacy_results"] == 1
-    assert result["calculation_version"] == "2.0"
+    assert result["calculation_version"] == "2.1"
 
 
 def test_performance_response_preserves_ambiguous_candle_resolution_flag():

@@ -14,9 +14,15 @@ def long_signal(tps=(101.5, 103.0)):
     }
 
 
-def candle(minute, high, low):
+def candle(minute, high, low, open_price=None):
     opened = T0 + timedelta(minutes=minute)
-    return {"open_time": opened, "close_time": opened + timedelta(seconds=59, milliseconds=999), "high": high, "low": low}
+    return {
+        "open_time": opened,
+        "close_time": opened + timedelta(seconds=59, milliseconds=999),
+        "open": open_price if open_price is not None else 100.1,
+        "high": high,
+        "low": low,
+    }
 
 
 def run(signal, candles, now=None):
@@ -37,6 +43,46 @@ def test_sl_first_is_minus_one_r():
     assert result["closed"]["result"] == "SL"
     assert result["closed"]["r_real"] == -1.0
     assert not result["closed"]["ambiguous"]
+
+
+
+
+def test_stop_r_uses_each_signals_dynamic_stop_and_gap_fill_price():
+    signal = long_signal()
+    signal["stop_loss"] = 99.6  # this trade's own SL; risk is 0.5, not a global fixed distance
+    gap_candle = candle(0, 100.2, 99.2, open_price=99.4)  # opens beyond the stop
+    result = run(signal, [gap_candle])
+
+    assert result["closed"]["result"] == "SL"
+    assert result["closed"]["exit_price"] == 99.4
+    # Entry 100.1 -> observed gap fill 99.4 = -0.7; initial risk 0.5 => -1.4R.
+    assert result["closed"]["r_real"] == -1.4
+    assert round(result["levels"]["risk"], 4) == 0.5
+
+
+def test_exact_dynamic_stop_fill_is_minus_one_r_by_definition():
+    signal = long_signal()
+    signal["stop_loss"] = 99.6
+    result = run(signal, [candle(0, 100.2, 99.5, open_price=100.0)])
+
+    assert result["closed"]["result"] == "SL"
+    assert result["closed"]["exit_price"] == 99.6
+    assert result["closed"]["r_real"] == -1.0
+    assert round(result["levels"]["risk"], 4) == 0.5
+
+
+def test_short_stop_gap_uses_the_dynamic_short_stop_and_actual_open():
+    signal = long_signal()
+    signal.update({
+        "direction": "SHORT", "stop_loss": 100.6,
+        "take_profits": [99.4, 98.8],
+    })
+    result = run(signal, [candle(0, 100.9, 100.2, open_price=100.8)])
+
+    assert result["closed"]["result"] == "SL"
+    assert result["closed"]["exit_price"] == 100.8
+    # Entry 100.1 -> short exit 100.8 = -0.7; initial risk 0.5 => -1.4R.
+    assert result["closed"]["r_real"] == -1.4
 
 
 def test_tp1_then_tp2_closes_at_tp2_multiple():
@@ -160,7 +206,9 @@ def test_result_snapshot_labels_simulated_model_and_separates_actual_zone_touch(
     assert doc["touch_price"] == 100.18
     assert doc["exit_price"] == 101.5
     assert doc["exit_via"] == "TP1_PROTECTIVE_STOP"
-    assert doc["calculation_version"] == "2.0"
+    assert doc["calculation_version"] == "2.1"
+    assert doc["risk"] == step["levels"]["risk"]
+    assert doc["risk_pct"] == round((step["levels"]["risk"] / step["levels"]["fill"]) * 100.0, 6)
     assert doc["execution_model"] == "SIMULATED_FULL_POSITION_TP1_PROTECTION"
     assert doc["r_real"] == step["closed"]["r_real"]
 
