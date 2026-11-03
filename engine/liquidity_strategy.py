@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_3_reference_plus_filters_dynamic_r"
+SCORE_CALIBRATION_VERSION = "v4_4_reference_plus_gentler_entry_pullback_dynamic_r"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -183,10 +183,11 @@ LONG_SCORE_FLOOR_BONUS = {
 PREMIUM_SCORE_FLOOR_BONUS = 2.0
 
 
-# Reducimos la fracción de retroceso deseado para posicionar la entrada más cerca del precio
-PULLBACK_RETRACE_FRACTION = breakout._env_float("LSR_PULLBACK_RETRACE_FRACTION", 0.38)
-# Permite pullbacks más pequeños antes de considerar una entrada válida
-PULLBACK_ATR_MIN = breakout._env_float("LSR_PULLBACK_ATR_MIN", 0.22)
+# Ajuste moderado de ejecución: esperar un retroceso ligeramente más profundo mejora
+# el precio de entrada potencial sin añadir filtros ni alterar el SL/TP estructural.
+# Puede reducir algunos fills si el mercado no vuelve a la zona proyectada.
+PULLBACK_RETRACE_FRACTION = breakout._env_float("LSR_PULLBACK_RETRACE_FRACTION", 0.42)
+PULLBACK_ATR_MIN = breakout._env_float("LSR_PULLBACK_ATR_MIN", 0.24)
 # Acorta el rango máximo de retroceso para evitar esperar pullbacks demasiado profundos
 PULLBACK_ATR_MAX = breakout._env_float("LSR_PULLBACK_ATR_MAX", 0.70)
 PULLBACK_LEVEL_BUFFER_ATR = breakout._env_float("LSR_PULLBACK_LEVEL_BUFFER_ATR", 0.04)
