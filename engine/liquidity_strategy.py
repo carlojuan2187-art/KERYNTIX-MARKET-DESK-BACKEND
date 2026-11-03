@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_2_liquidity_sweep_operational_receptive"
+SCORE_CALIBRATION_VERSION = "v4_3_reference_plus_filters_dynamic_r"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -123,9 +123,11 @@ PREMIUM_PROFILE = {
 
 
 # MTF signal mapping:
-# Only ONE signal exists now: PREMIUM. It uses the reference "plus" FILTER
-# (internal filter name, unrelated to the removed PLUS subscription plan).
-# FREE users in their trial period receive this same premium signal.
+# The single published KERYNTIX signal keeps its existing PREMIUM delivery tier,
+# but its entry filters are calibrated to the user's reference PLUS profile.
+# Only filter thresholds are borrowed; KERYNTIX retains its own 5m execution,
+# structural/dynamic stop-loss and liquidity-based take-profit calculations.
+# FREE trial users continue receiving this same published signal.
 MTF_PREMIUM_PROFILE = dict(PLUS_PROFILE)
 MTF_PREMIUM_PROFILE["name"] = "premium"
 MTF_PREMIUM_PROFILE["filter_profile"] = "plus"

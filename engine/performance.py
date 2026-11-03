@@ -7,6 +7,8 @@ from typing import Any, Mapping, Sequence
 
 UTC = timezone.utc
 VALID_RESULTS = {"TP1", "TP2", "SL"}
+CURRENT_CALCULATION_VERSION = "2.1"
+SUPPORTED_CALCULATION_VERSIONS = {"2.0", CURRENT_CALCULATION_VERSION}
 
 
 def as_utc(value: Any) -> datetime | None:
@@ -103,6 +105,12 @@ def build_performance(rows: Sequence[Mapping[str, Any]], *, period: str, now: da
             # Do not drop the result from top-line stats, but do not invent a row
             # for the trade detail table if a legacy document lacks its exit level.
             exit_price = None
+        try:
+            risk_distance = float(row.get("risk"))
+            if not isfinite(risk_distance) or risk_distance <= 0:
+                risk_distance = None
+        except (TypeError, ValueError, OverflowError):
+            risk_distance = None
         closed.append({
             "id": str(row.get("id") or row.get("signal_id") or ""),
             "symbol": str(row.get("symbol") or "").upper(),
@@ -111,6 +119,8 @@ def build_performance(rows: Sequence[Mapping[str, Any]], *, period: str, now: da
             "exit_price": exit_price,
             "result": result,
             "r_result": r_real,
+            "risk_distance": risk_distance,
+            "risk_pct": round((risk_distance / entry) * 100.0, 6) if risk_distance is not None else None,
             "calculation_version": str(row.get("calculation_version") or "legacy_v1"),
             "execution_model": row.get("execution_model"),
             "entry_reference": row.get("entry_reference"),
@@ -172,8 +182,8 @@ def build_performance(rows: Sequence[Mapping[str, Any]], *, period: str, now: da
         "curve": curve,
         "trades": public_trades,
         "data_integrity_warnings": sum(1 for trade in closed if trade["exit_price"] is None),
-        "legacy_results": sum(1 for trade in closed if trade["calculation_version"] != "2.0"),
-        "calculation_version": "2.0",
+        "legacy_results": sum(1 for trade in closed if trade["calculation_version"] not in SUPPORTED_CALCULATION_VERSIONS),
+        "calculation_version": CURRENT_CALCULATION_VERSION,
         "period_start": start.isoformat().replace("+00:00", "Z") if start else None,
         "calculation_timezone": "UTC",
     }

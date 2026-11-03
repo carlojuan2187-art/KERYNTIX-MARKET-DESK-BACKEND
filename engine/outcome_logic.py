@@ -6,7 +6,7 @@ fill price. Risk and target R multiples therefore use the same reference that
 was used by the strategy to build SL/TP1/TP2.
 
 Resolution rules:
-    * SL before TP1                         -> -1R
+    * SL before TP1                         -> R computed from this signal's actual entry/SL geometry
     * TP1, then TP2                         -> R(TP2)
     * TP1, then retrace to protected TP1    -> R(TP1)
     * single-target signal reaches TP1      -> R(TP1), closed
@@ -38,7 +38,7 @@ WIN_RESULTS = (RESULT_TP1, RESULT_TP2)
 
 EVENT_TP1_HIT = "TP1_HIT"
 EVENT_CLOSED = "CLOSED"
-CALCULATION_VERSION = "2.0"
+CALCULATION_VERSION = "2.1"
 EXECUTION_MODEL = "SIMULATED_FULL_POSITION_TP1_PROTECTION"
 
 
@@ -139,6 +139,35 @@ def _protective_tp1_hit(levels: Dict[str, Any], candle: Dict[str, Any]) -> bool:
     return low <= levels["tp1"] if levels["direction"] == "LONG" else high >= levels["tp1"]
 
 
+def _realized_r(levels: Dict[str, Any], exit_price: float) -> float:
+    """Calculate realized R from this signal's own entry, stop risk and exit.
+
+    R is normalized by the initial risk distance (entry to this signal's SL).
+    A fill exactly at the initial SL is therefore -1R by definition, while a
+    worse gap/slippage fill can be below -1R and a better fill can be above it.
+    """
+    risk = _f(levels.get("risk"))
+    entry = _f(levels.get("fill"))
+    exit_value = _f(exit_price)
+    if risk <= 1e-12 or entry <= 0 or exit_value <= 0:
+        return 0.0
+    signed_move = exit_value - entry if levels.get("direction") == "LONG" else entry - exit_value
+    return signed_move / risk
+
+
+def _sl_fill_from_candle(levels: Dict[str, Any], candle: Dict[str, Any]) -> float:
+    """Simulate a stop-market fill, accounting for a candle opening beyond SL."""
+    stop = _f(levels.get("sl"))
+    opened = _f(candle.get("open"))
+    if stop <= 0 or opened <= 0:
+        return stop
+    if levels.get("direction") == "LONG" and opened < stop:
+        return opened
+    if levels.get("direction") == "SHORT" and opened > stop:
+        return opened
+    return stop
+
+
 def advance_trade(
     signal: Dict[str, Any],
     candles: Iterable[Dict[str, Any]],
@@ -177,8 +206,9 @@ def advance_trade(
 
     def close(res: str, at: datetime, *, ambiguous: bool, via: str, exit_price: float) -> None:
         nonlocal tp1_at, tp2_at
-        r_map = {RESULT_TP1: levels["r_tp1"], RESULT_TP2: levels["r_tp2"], RESULT_SL: -1.0}
-        r_real = round(float(r_map[res]), 4)
+        # Use the actual exit price and the per-signal risk distance derived
+        # from its dynamic stop_loss. Do not inject a fixed SL result constant.
+        r_real = round(_realized_r(levels, exit_price), 4)
         if res in WIN_RESULTS and tp1_at is None:
             tp1_at = at
         if res == RESULT_TP2 and tp2_at is None:
@@ -267,7 +297,7 @@ def advance_trade(
         if current == STATE_OPEN:
             if sl_hit:
                 # SL and TP1 in one candle: order unknown; keep the conservative SL.
-                close(RESULT_SL, close_at, ambiguous=tp1_hit, via="SL", exit_price=levels["sl"])
+                close(RESULT_SL, close_at, ambiguous=tp1_hit, via="SL", exit_price=_sl_fill_from_candle(levels, candle))
                 break
             if tp2_hit:
                 # TP2 implies TP1 was crossed first in directional price space. If
@@ -306,7 +336,7 @@ def advance_trade(
                     close(
                         RESULT_SL, close_at, ambiguous=True,
                         via="SL_TP1_ACTIVATION_CANDLE_AMBIGUOUS",
-                        exit_price=levels["sl"],
+                        exit_price=_sl_fill_from_candle(levels, candle),
                     )
                     break
                 if tp2_hit and protective_hit:
@@ -368,7 +398,7 @@ def advance_trade(
 
         if current == STATE_OPEN:
             if adverse_hit:
-                close(RESULT_SL, live_at, ambiguous=False, via="SL_LIVE_PRICE", exit_price=levels["sl"])
+                close(RESULT_SL, live_at, ambiguous=False, via="SL_LIVE_PRICE", exit_price=price)
             elif tp2_hit:
                 mark_tp1(live_at, via="TP2_LIVE_PRICE")
                 tp2_at = live_at
@@ -415,6 +445,7 @@ def build_result_doc(signal: Dict[str, Any], levels: Dict[str, Any], closed: Dic
         "stop_loss": levels["sl"],
         "take_profits": [v for v in (levels["tp1"], levels["tp2"]) if v is not None],
         "risk": levels["risk"],
+        "risk_pct": round((levels["risk"] / levels["fill"]) * 100.0, 6) if levels["fill"] > 0 else None,
         "r_tp1": round(levels["r_tp1"], 4),
         "r_tp2": round(levels["r_tp2"], 4) if levels["r_tp2"] is not None else None,
         "result": closed["result"],
