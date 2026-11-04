@@ -41,6 +41,7 @@ SCAN_INTERVAL_SECONDS = max(10, int(os.getenv("SCAN_INTERVAL_SECONDS", "60")))
 SCAN_CONCURRENCY = max(1, min(8, int(os.getenv("SCAN_CONCURRENCY", "4"))))
 DEDUP_MINUTES = max(1, int(os.getenv("DEDUP_MINUTES", "10")))
 ENTRY_WINDOW_MINUTES = max(5, int(os.getenv("ENTRY_WINDOW_MINUTES", "15")))
+REQUIRE_FRESH_SWEEP_AFTER_SL = os.getenv("LSR_REQUIRE_FRESH_SWEEP_AFTER_SL", "true").strip().lower() not in {"0", "false", "no", "off"}
 SIGNAL_STATUS_KEY = "signal-engine:status:v1"
 
 
@@ -49,11 +50,50 @@ def _utc_aware(value: Any) -> datetime | None:
         return None
     if hasattr(value, "to_pydatetime"):
         value = value.to_pydatetime()
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            value = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
     if not isinstance(value, datetime):
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _latest_sl_by_symbol_direction(rows: list[Mapping[str, Any]]) -> dict[tuple[str, str], datetime]:
+    """Return the latest closed SL per symbol/direction from immutable results."""
+    latest: dict[tuple[str, str], datetime] = {}
+    for row in rows:
+        if str(row.get("result") or "").upper() != "SL":
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        direction = str(row.get("direction") or "").strip().upper()
+        closed_at = _utc_aware(row.get("closed_at"))
+        if not symbol or direction not in {"LONG", "SHORT"} or closed_at is None:
+            continue
+        key = (symbol, direction)
+        if key not in latest or closed_at > latest[key]:
+            latest[key] = closed_at
+    return latest
+
+
+def _fresh_sweep_after_last_sl(
+    candidate: Mapping[str, Any],
+    latest_sl: Mapping[tuple[str, str], datetime],
+) -> bool:
+    """After an SL, require a newly confirmed sweep before same-side re-entry."""
+    key = (str(candidate.get("symbol") or "").strip().upper(), str(candidate.get("direction") or "").strip().upper())
+    stopped_at = latest_sl.get(key)
+    if stopped_at is None:
+        return True
+    sweep_at = _utc_aware(candidate.get("liquidity_sweep_at"))
+    # Missing sweep timestamps cannot prove that the setup is structurally new.
+    return sweep_at is not None and sweep_at > stopped_at
 
 
 def _frame_from_klines(rows: list[list[Any]]) -> pd.DataFrame:
@@ -383,12 +423,24 @@ class SignalScanner:
             logger.warning("No se pudieron guardar barridos observados: %s", exc)
 
         candidates.sort(key=lambda pair: float(pair[1].get("score") or 0), reverse=True)
+        latest_sl: dict[tuple[str, str], datetime] = {}
+        if REQUIRE_FRESH_SWEEP_AFTER_SL:
+            try:
+                # One bounded read per scan, rather than a database query per symbol.
+                latest_sl = _latest_sl_by_symbol_direction(self.repository.list_results(limit=500))
+            except Exception as exc:
+                # If immutable history is temporarily unavailable, fail open so a
+                # read outage does not stop all market signals; dedupe still applies.
+                logger.warning("No se pudo consultar el último SL para controlar reentradas: %s", type(exc).__name__)
         signals_created = 0
         attempted_candidates = 0
         for visibility, candidate in candidates:
             symbol = str(candidate.get("symbol") or "").upper()
             direction = str(candidate.get("direction") or "").upper()
             if not symbol or direction not in {"LONG", "SHORT"}:
+                continue
+            if REQUIRE_FRESH_SWEEP_AFTER_SL and not _fresh_sweep_after_last_sl(candidate, latest_sl):
+                rejects["post_sl_waiting_fresh_sweep"] = rejects.get("post_sl_waiting_fresh_sweep", 0) + 1
                 continue
             if not candidate.get("setup_confirmed_at"):
                 continue
