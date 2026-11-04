@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_4_reference_plus_gentler_entry_pullback_dynamic_r"
+SCORE_CALIBRATION_VERSION = "v4_5_plus_pullback_reentry_structural_tp2"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -230,12 +230,15 @@ SL_MIN_RISK_ATR = breakout._env_float("LSR_SL_MIN_RISK_ATR", 0.30)   # suelo ant
 SL_MAX_RISK_ATR = breakout._env_float("LSR_SL_MAX_RISK_ATR", 1.60)   # techo: stop demasiado lejos
 TARGET_LOOKBACK_15M = max(24, int(os.getenv("LSR_TARGET_LOOKBACK_15M", "96")))
 TARGET_LOOKBACK_1H = max(12, int(os.getenv("LSR_TARGET_LOOKBACK_1H", "48")))
+# TP1 keeps its original lookback. TP2 may inspect a wider historical window,
+# but it can only use confirmed historical swing/range levels (never a synthetic RR).
+TARGET_TP2_LOOKBACK_MULTIPLIER = max(1.0, breakout._env_float("LSR_TARGET_TP2_LOOKBACK_MULTIPLIER", 2.0))
 TARGET_PIVOT_BARS = max(1, int(os.getenv("LSR_TARGET_PIVOT_BARS", "2")))
 TARGET_CLUSTER_ATR = breakout._env_float("LSR_TARGET_CLUSTER_ATR", 0.25)
 TARGET_FRONTRUN_ATR = breakout._env_float("LSR_TARGET_FRONTRUN_ATR", 0.06)
 TARGET_MIN_GAP_ATR = breakout._env_float("LSR_TARGET_MIN_GAP_ATR", 0.35)
 TARGET_MAX_ATR = breakout._env_float("LSR_TARGET_MAX_ATR", 6.0)
-TARGET_MODEL_NAME = "structural_liquidity_v1"
+TARGET_MODEL_NAME = "structural_liquidity_v2_extended_tp2"
 
 
 def _record_reject(debug_counts: Optional[Dict[str, int]], reason: str) -> None:
@@ -766,26 +769,48 @@ def _build_structural_trade(
         return None, "liquidity_stop_too_wide"
 
     # ---- Take Profits: siguientes pools de liquidez en la dirección del trade ----
-    levels = _swing_levels(df_15m, direction, TARGET_LOOKBACK_15M, "15M")
-    levels += _swing_levels(df_1h, direction, TARGET_LOOKBACK_1H, "1H")
-    levels = _cluster_levels(levels, direction, atr_now * max(TARGET_CLUSTER_ATR, 0.0))
+    # TP1 mantiene exactamente la ventana estructural anterior para no mover
+    # innecesariamente el objetivo cercano de las señales existentes.
+    primary_levels = _swing_levels(df_15m, direction, TARGET_LOOKBACK_15M, "15M")
+    primary_levels += _swing_levels(df_1h, direction, TARGET_LOOKBACK_1H, "1H")
+    primary_levels = _cluster_levels(primary_levels, direction, atr_now * max(TARGET_CLUSTER_ATR, 0.0))
 
     frontrun = atr_now * max(TARGET_FRONTRUN_ATR, 0.0)
     max_reach = atr_now * max(TARGET_MAX_ATR, 0.5)
-    candidates: List[Dict] = []
-    for level in levels:
-        price = float(level["price"]) - frontrun if is_long else float(level["price"]) + frontrun
-        reach = (price - entry_price) if is_long else (entry_price - price)
-        if reach <= 0 or reach > max_reach:
-            continue
-        candidates.append({**level, "target": price, "reach": reach, "rr": reach / risk_distance})
-    candidates.sort(key=lambda item: item["reach"])
 
-    tp1 = next((c for c in candidates if c["rr"] >= MIN_PUBLISH_TP1_RR), None)
+    def target_candidates(levels: List[Dict]) -> List[Dict]:
+        candidates: List[Dict] = []
+        for level in levels:
+            price = float(level["price"]) - frontrun if is_long else float(level["price"]) + frontrun
+            reach = (price - entry_price) if is_long else (entry_price - price)
+            if reach <= 0 or reach > max_reach:
+                continue
+            candidates.append({**level, "target": price, "reach": reach, "rr": reach / risk_distance})
+        return sorted(candidates, key=lambda item: item["reach"])
+
+    primary_candidates = target_candidates(primary_levels)
+
+    tp1 = next((c for c in primary_candidates if c["rr"] >= MIN_PUBLISH_TP1_RR), None)
     if tp1 is None:
         return None, "liquidity_no_structural_target"
+
+    # TP2 is selected from a wider historical window of real 15m/1h swing
+    # levels. The already-selected TP1 is not changed. This improves the chance
+    # of finding a second structural objective without inventing a fixed 1.5R/2R.
+    extended_15m = max(TARGET_LOOKBACK_15M, int(round(TARGET_LOOKBACK_15M * TARGET_TP2_LOOKBACK_MULTIPLIER)))
+    extended_1h = max(TARGET_LOOKBACK_1H, int(round(TARGET_LOOKBACK_1H * TARGET_TP2_LOOKBACK_MULTIPLIER)))
+    tp2_levels = _swing_levels(df_15m, direction, extended_15m, "15M-EXT")
+    tp2_levels += _swing_levels(df_1h, direction, extended_1h, "1H-EXT")
+    # Combine current and extended levels so equal/nearby highs/lows still form
+    # one liquidity pool and cannot be advertised as two separate objectives.
+    tp2_levels = _cluster_levels(
+        primary_levels + tp2_levels,
+        direction,
+        atr_now * max(TARGET_CLUSTER_ATR, 0.0),
+    )
+    secondary_candidates = target_candidates(tp2_levels)
     min_gap = atr_now * max(TARGET_MIN_GAP_ATR, 0.0)
-    tp2 = next((c for c in candidates if c["reach"] - tp1["reach"] >= min_gap), None)
+    tp2 = next((c for c in secondary_candidates if c["reach"] - tp1["reach"] >= min_gap), None)
 
     chosen = [tp1] + ([tp2] if tp2 is not None else [])
     take_profits = [breakout._round_price_dynamic(c["target"]) for c in chosen]
@@ -970,6 +995,7 @@ def _evaluate_direction(
         "liquidity_zone": breakout._round_price_dynamic(level),
         "liquidity_sweep_distance_atr": sweep.get("sweep_distance_atr"),
         "liquidity_sweep_extreme_price": sweep.get("extreme_price"),
+        "liquidity_sweep_at": df.loc[sweep["index"]].get("close_time"),
         "strategy_runtime": {
             "post_fill_invalidation": {
                 "minutes": POST_FILL_INVALIDATION_MINUTES,
@@ -1293,6 +1319,7 @@ def _evaluate_direction_5m_execution(
         "liquidity_zone": breakout._round_price_dynamic(level),
         "liquidity_sweep_distance_atr": sweep.get("sweep_distance_atr"),
         "liquidity_sweep_extreme_price": sweep.get("extreme_price"),
+        "liquidity_sweep_at": df_5m.loc[sweep["index"]].get("close_time"),
         "strategy_runtime": {
             "post_fill_invalidation": {
                 "minutes": POST_FILL_INVALIDATION_MINUTES,

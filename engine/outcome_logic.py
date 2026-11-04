@@ -7,17 +7,18 @@ was used by the strategy to build SL/TP1/TP2.
 
 Resolution rules:
     * SL before TP1                         -> R computed from this signal's actual entry/SL geometry
-    * TP1, then TP2                         -> R(TP2)
-    * TP1, then retrace to protected TP1    -> R(TP1)
+    * TP1, then TP2                         -> R(TP2), never TP1 + TP2
+    * TP1, then retrace to entry             -> R(TP1) is retained and result is TP1
     * single-target signal reaches TP1      -> R(TP1), closed
 
-This is a single-full-position simulation; it does not model partial exits,
-exchange fees, funding, spread or slippage. TP1 activates a protective stop at
-TP1 for subsequent market observations. Closed 1m candles remain the fallback;
+This is a single-full-position result model; it does not model partial exits,
+exchange fees, funding, spread or slippage. After TP1, entry is the protective
+trigger. If that trigger is reached, the model books the TP1 R already reached;
+if TP2 is reached first, it books only TP2 R. Closed 1m candles remain the fallback;
 fresh market-feed snapshots can advance a level sooner when available.
 
 Candle ambiguity is conservative: if a candle can contain both TP2 and a return
-to the TP1 protection level, the model records TP1 and marks it ambiguous.
+to the entry protection level, the model records TP1 and marks it ambiguous.
 """
 
 from __future__ import annotations
@@ -38,8 +39,8 @@ WIN_RESULTS = (RESULT_TP1, RESULT_TP2)
 
 EVENT_TP1_HIT = "TP1_HIT"
 EVENT_CLOSED = "CLOSED"
-CALCULATION_VERSION = "2.1"
-EXECUTION_MODEL = "SIMULATED_FULL_POSITION_TP1_PROTECTION"
+CALCULATION_VERSION = "2.3"
+EXECUTION_MODEL = "SIMULATED_FULL_POSITION_TP1_CREDIT_ENTRY_PROTECTION"
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -131,12 +132,13 @@ def _hits(levels: Dict[str, Any], candle: Dict[str, Any]):
     return sl_hit, tp1_hit, tp2_hit
 
 
-def _protective_tp1_hit(levels: Dict[str, Any], candle: Dict[str, Any]) -> bool:
+def _protective_entry_hit(levels: Dict[str, Any], candle: Dict[str, Any]) -> bool:
     high = _f(candle.get("high"))
     low = _f(candle.get("low"))
     if high <= 0 or low <= 0:
         return False
-    return low <= levels["tp1"] if levels["direction"] == "LONG" else high >= levels["tp1"]
+    entry = _f(levels.get("fill"))
+    return low <= entry if levels["direction"] == "LONG" else high >= entry
 
 
 def _realized_r(levels: Dict[str, Any], exit_price: float) -> float:
@@ -204,11 +206,34 @@ def advance_trade(
         result["advanced"] = True
         return result
 
-    def close(res: str, at: datetime, *, ambiguous: bool, via: str, exit_price: float) -> None:
+    # Migrate an already-open TP1_HIT trade from the previous TP1-stop model:
+    # the new protective trigger is the original entry. This is metadata/state
+    # alignment only; the trade's TP1/TP2 levels and credited R remain unchanged.
+    if state == STATE_TP1_HIT and _f(outcome.get("protective_stop_price")) != _f(levels["fill"]):
+        outcome["protective_stop_price"] = levels["fill"]
+        result["advanced"] = True
+
+    def close(
+        res: str,
+        at: datetime,
+        *,
+        ambiguous: bool,
+        via: str,
+        exit_price: float,
+        trigger_price: Optional[float] = None,
+    ) -> None:
         nonlocal tp1_at, tp2_at
-        # Use the actual exit price and the per-signal risk distance derived
-        # from its dynamic stop_loss. Do not inject a fixed SL result constant.
-        r_real = round(_realized_r(levels, exit_price), 4)
+        # One operation books exactly one target. An entry-protection trigger
+        # after TP1 keeps TP1's credited R; a TP2 close books only TP2's R.
+        # SL is calculated from the actual simulated fill and this signal's own
+        # entry-to-dynamic-stop risk distance.
+        if res == RESULT_TP1:
+            r_real = round(float(levels["r_tp1"]), 4)
+        elif res == RESULT_TP2 and levels.get("r_tp2") is not None:
+            r_real = round(float(levels["r_tp2"]), 4)
+        else:
+            r_real = round(_realized_r(levels, exit_price), 4)
+        actual_trigger = float(trigger_price if trigger_price is not None else exit_price)
         if res in WIN_RESULTS and tp1_at is None:
             tp1_at = at
         if res == RESULT_TP2 and tp2_at is None:
@@ -220,9 +245,10 @@ def advance_trade(
             "tp1_at": tp1_at,
             "tp2_at": tp2_at,
             "tracked_until": at,
-            "protective_stop_price": levels["tp1"] if tp1_at is not None else None,
+            "protective_stop_price": levels["fill"] if tp1_at is not None else None,
             "protection_armed_at": protection_armed_at,
             "exit_price": float(exit_price),
+            "exit_trigger_price": actual_trigger,
             "exit_via": via,
             "calculation_version": CALCULATION_VERSION,
             "execution_model": EXECUTION_MODEL,
@@ -236,6 +262,7 @@ def advance_trade(
             "tp1_at": tp1_at,
             "tp2_at": tp2_at,
             "exit_price": float(exit_price),
+            "exit_trigger_price": actual_trigger,
             "via": via,
             "calculation_version": CALCULATION_VERSION,
             "execution_model": EXECUTION_MODEL,
@@ -248,9 +275,21 @@ def advance_trade(
             "r": r_real,
             "r_tp1": round(levels["r_tp1"], 4),
             "exit_price": float(exit_price),
+            "exit_trigger_price": actual_trigger,
             "ambiguous": ambiguous,
         })
         result["advanced"] = True
+
+    # Older persisted signals may have entered TP1_HIT while carrying only one
+    # target. There is no valid continuation target to wait for, so settle them
+    # as TP1 instead of leaving them open indefinitely under the new state model.
+    if state == STATE_TP1_HIT and levels.get("tp2") is None:
+        close(
+            RESULT_TP1, tp1_at or now, ambiguous=False,
+            via="TP1_ONLY_EXISTING_SIGNAL",
+            exit_price=levels["tp1"], trigger_price=levels["tp1"],
+        )
+        return result
 
     def mark_tp1(at: datetime, *, via: str) -> None:
         nonlocal tp1_at, protection_armed_at
@@ -260,7 +299,7 @@ def advance_trade(
         outcome.update({
             "state": STATE_TP1_HIT,
             "tp1_at": tp1_at,
-            "protective_stop_price": levels["tp1"],
+            "protective_stop_price": levels["fill"],
             "protection_armed_at": protection_armed_at,
         })
         result["events"].append({
@@ -269,7 +308,7 @@ def advance_trade(
             "at": at,
             "r": round(levels["r_tp1"], 4),
             "r_tp1": round(levels["r_tp1"], 4),
-            "protective_stop_price": levels["tp1"],
+            "protective_stop_price": levels["fill"],
             "via": via,
             "ambiguous": False,
         })
@@ -301,25 +340,34 @@ def advance_trade(
                 break
             if tp2_hit:
                 # TP2 implies TP1 was crossed first in directional price space. If
-                # the same candle also returns through TP1, order is unknowable; use
-                # the protected TP1 outcome rather than overstate the TP2 result.
+                # the same candle also returns to entry, order is unknowable; book
+                # only the protected TP1 result rather than overstate the TP2 result.
                 mark_tp1(close_at, via="TP2_SAME_CANDLE")
-                if _protective_tp1_hit(levels, candle):
+                if _protective_entry_hit(levels, candle):
                     close(
                         RESULT_TP1, close_at, ambiguous=True,
-                        via="TP1_TP2_SAME_CANDLE_PROTECTIVE_AMBIGUOUS",
+                        via="TP1_TP2_SAME_CANDLE_ENTRY_PROTECTION_AMBIGUOUS",
                         exit_price=levels["tp1"],
+                        trigger_price=levels["fill"],
                     )
                 else:
                     tp2_at = close_at
-                    close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"])
+                    close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"], trigger_price=levels["tp2"])
                 break
             if tp1_hit:
                 mark_tp1(close_at, via="TP1_CANDLE")
                 if levels["tp2"] is None:
-                    close(RESULT_TP1, close_at, ambiguous=False, via="TP1_ONLY", exit_price=levels["tp1"])
+                    close(RESULT_TP1, close_at, ambiguous=False, via="TP1_ONLY", exit_price=levels["tp1"], trigger_price=levels["tp1"])
                     break
-        else:  # TP1_HIT: protective stop at TP1 is active, original SL is retired.
+                if _protective_entry_hit(levels, candle):
+                    close(
+                        RESULT_TP1, close_at, ambiguous=True,
+                        via="TP1_ENTRY_RETEST_SAME_CANDLE_AMBIGUOUS",
+                        exit_price=levels["tp1"],
+                        trigger_price=levels["fill"],
+                    )
+                    break
+        else:  # TP1_HIT: protective stop at entry is active, original SL is retired.
             # If TP1 protection was armed part-way through this same candle, its
             # earlier low/high cannot prove a post-activation stop-out. Keep it
             # open unless TP2 and the protective area both appear (ambiguous);
@@ -327,7 +375,7 @@ def advance_trade(
             activation_inside_candle = (
                 protection_armed_at is not None and open_at < protection_armed_at <= close_at
             )
-            protective_hit = _protective_tp1_hit(levels, candle)
+            protective_hit = _protective_entry_hit(levels, candle)
             if activation_inside_candle:
                 if sl_hit:
                     # The candle includes the live TP1 activation and the original
@@ -342,36 +390,39 @@ def advance_trade(
                 if tp2_hit and protective_hit:
                     close(
                         RESULT_TP1, close_at, ambiguous=True,
-                        via="TP1_PROTECTION_AMBIGUOUS_ACTIVATION_CANDLE",
+                        via="TP1_ENTRY_PROTECTION_AMBIGUOUS_ACTIVATION_CANDLE",
                         exit_price=levels["tp1"],
+                        trigger_price=levels["fill"],
                     )
                     break
                 if tp2_hit:
                     tp2_at = close_at
-                    close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"])
+                    close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"], trigger_price=levels["tp2"])
                     break
                 # A low/high on this activation candle may predate the exact live
                 # TP1 tick. Wait for a subsequent observation to test the new stop.
                 continue
             if protective_hit and tp2_hit:
-                # With TP1 protection already active, unknown intrabar order is
-                # resolved conservatively at the protected TP1 level.
+                # With entry protection already active, unknown intrabar order is
+                # resolved conservatively at the protected TP1 result.
                 close(
                     RESULT_TP1, close_at, ambiguous=True,
-                    via="TP1_PROTECTIVE_STOP_AMBIGUOUS",
+                    via="TP1_ENTRY_PROTECTION_AMBIGUOUS",
                     exit_price=levels["tp1"],
+                    trigger_price=levels["fill"],
                 )
                 break
             if protective_hit:
                 close(
                     RESULT_TP1, close_at, ambiguous=False,
-                    via="TP1_PROTECTIVE_STOP",
+                    via="TP1_ENTRY_PROTECTION",
                     exit_price=levels["tp1"],
+                    trigger_price=levels["fill"],
                 )
                 break
             if tp2_hit:
                 tp2_at = close_at
-                close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"])
+                close(RESULT_TP2, close_at, ambiguous=False, via="TP2", exit_price=levels["tp2"], trigger_price=levels["tp2"])
                 break
 
     # Live feed snapshot: process only a new observation that is newer than the
@@ -394,31 +445,32 @@ def advance_trade(
         tp2_hit = levels["tp2"] is not None and (
             price >= levels["tp2"] if direction == "LONG" else price <= levels["tp2"]
         )
-        protective_hit = price <= levels["tp1"] if direction == "LONG" else price >= levels["tp1"]
+        protective_hit = price <= levels["fill"] if direction == "LONG" else price >= levels["fill"]
 
         if current == STATE_OPEN:
             if adverse_hit:
-                close(RESULT_SL, live_at, ambiguous=False, via="SL_LIVE_PRICE", exit_price=price)
+                close(RESULT_SL, live_at, ambiguous=False, via="SL_LIVE_PRICE", exit_price=price, trigger_price=price)
             elif tp2_hit:
                 mark_tp1(live_at, via="TP2_LIVE_PRICE")
                 tp2_at = live_at
-                close(RESULT_TP2, live_at, ambiguous=False, via="TP2_LIVE_PRICE", exit_price=levels["tp2"])
+                close(RESULT_TP2, live_at, ambiguous=False, via="TP2_LIVE_PRICE", exit_price=levels["tp2"], trigger_price=levels["tp2"])
             elif tp1_hit:
                 mark_tp1(live_at, via="TP1_LIVE_PRICE")
                 if levels["tp2"] is None:
-                    close(RESULT_TP1, live_at, ambiguous=False, via="TP1_ONLY_LIVE_PRICE", exit_price=levels["tp1"])
+                    close(RESULT_TP1, live_at, ambiguous=False, via="TP1_ONLY_LIVE_PRICE", exit_price=levels["tp1"], trigger_price=levels["tp1"])
             if result["advanced"]:
                 outcome["last_live_price_at"] = live_at
         else:  # TP1 protection armed on a prior observation/candle.
             if protective_hit:
                 close(
                     RESULT_TP1, live_at, ambiguous=False,
-                    via="TP1_PROTECTIVE_STOP_LIVE_PRICE",
+                    via="TP1_ENTRY_PROTECTION_LIVE_PRICE",
                     exit_price=levels["tp1"],
+                    trigger_price=price,
                 )
             elif tp2_hit:
                 tp2_at = live_at
-                close(RESULT_TP2, live_at, ambiguous=False, via="TP2_LIVE_PRICE", exit_price=levels["tp2"])
+                close(RESULT_TP2, live_at, ambiguous=False, via="TP2_LIVE_PRICE", exit_price=levels["tp2"], trigger_price=levels["tp2"])
             if result["advanced"]:
                 outcome["last_live_price_at"] = live_at
 
@@ -452,7 +504,9 @@ def build_result_doc(signal: Dict[str, Any], levels: Dict[str, Any], closed: Dic
         "outcome": closed["outcome"],
         "r_real": closed["r_real"],
         "exit_price": closed.get("exit_price"),
+        "exit_trigger_price": closed.get("exit_trigger_price"),
         "exit_via": closed.get("via"),
+        "liquidity_sweep_at": _dt(signal.get("liquidity_sweep_at")),
         "calculation_version": closed.get("calculation_version", CALCULATION_VERSION),
         "execution_model": closed.get("execution_model", EXECUTION_MODEL),
         "ambiguous": bool(closed["ambiguous"]),
