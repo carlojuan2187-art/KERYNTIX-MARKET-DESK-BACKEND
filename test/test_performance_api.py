@@ -114,7 +114,7 @@ def test_performance_prefers_explicit_simulated_exit_and_counts_legacy_snapshots
     assert trade_by_id["signal-1"]["exit_via"] == "TP1_PROTECTIVE_STOP_LIVE_PRICE"
     assert trade_by_id["signal-2"]["calculation_version"] == "legacy_v1"
     assert result["legacy_results"] == 1
-    assert result["calculation_version"] == "2.1"
+    assert result["calculation_version"] == "2.3"
 
 
 def test_performance_response_preserves_ambiguous_candle_resolution_flag():

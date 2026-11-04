@@ -196,7 +196,7 @@ async def test_open_trade_uses_fresh_websocket_prices_for_tp1_protection_and_clo
     assert changed == 1
     saved = repository.snapshot_signals()[0]
     assert saved["outcome"]["state"] == "TP1_HIT"
-    assert saved["outcome"]["protective_stop_price"] == 103.0
+    assert saved["outcome"]["protective_stop_price"] == 100.5
     assert saved["outcome"]["last_live_price_at"] is not None
     assert repository.list_results() == []
 
@@ -204,7 +204,7 @@ async def test_open_trade_uses_fresh_websocket_prices_for_tp1_protection_and_clo
     second_at = second_now.timestamp()
     await cache.set_json(QUOTES_KEY, {
         "BTCUSDT": {
-            "symbol": "BTCUSDT", "price": 102.99,
+            "symbol": "BTCUSDT", "price": 100.5,
             "price_updated_epoch": second_at,
         }
     })
@@ -219,7 +219,7 @@ async def test_open_trade_uses_fresh_websocket_prices_for_tp1_protection_and_clo
     assert saved["outcome"]["state"] == "CLOSED"
     assert saved["outcome"]["result"] == "TP1"
     assert saved["outcome"]["exit_price"] == 103.0
-    assert saved["outcome"]["exit_via"] == "TP1_PROTECTIVE_STOP_LIVE_PRICE"
+    assert saved["outcome"]["exit_via"] == "TP1_ENTRY_PROTECTION_LIVE_PRICE"
     assert len(repository.list_results()) == 1
     assert repository.list_results()[0]["r_real"] == 1.0
 
@@ -278,7 +278,7 @@ async def test_live_transition_replays_previous_tp1_before_current_market_snapsh
     now = utc_now()
     signal = touched_signal(now)
     candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
-    market = FakeMarket([kline(candle_open, high=103.2, low=100.3, close=103.1)])
+    market = FakeMarket([kline(candle_open, high=103.2, low=100.6, close=103.1)])
     cache = InMemoryJsonCache()
     repository = InMemoryLifecycleRepository([signal])
     worker = SignalLifecycleWorker(market, repository, cache, clock=lambda: now)
@@ -296,6 +296,6 @@ async def test_live_transition_replays_previous_tp1_before_current_market_snapsh
     saved = repository.snapshot_signals()[0]
     assert saved["outcome"]["state"] == "TP1_HIT"
     assert "result" not in saved["outcome"]
-    assert saved["outcome"]["protective_stop_price"] == 103.0
+    assert saved["outcome"]["protective_stop_price"] == 100.5
     assert saved["outcome"]["tracked_until"] is not None
     assert saved["outcome"]["protection_armed_at"] is not None
