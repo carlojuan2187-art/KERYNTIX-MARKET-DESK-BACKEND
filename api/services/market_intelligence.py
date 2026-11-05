@@ -468,6 +468,12 @@ class MarketIntelligenceService:
                     if symbol not in seen:
                         seen.add(symbol)
                         shortlist.append(row)
+                        # Exact candle confirmation is supplementary; cap it to one
+                        # bounded batch and keep estimated history for the rest.
+                        if len(shortlist) >= 4:
+                            break
+                if len(shortlist) >= 4:
+                    break
             semaphore = asyncio.Semaphore(4)
             async def enrich(row: dict[str, Any]):
                 symbol = row["symbol"]
