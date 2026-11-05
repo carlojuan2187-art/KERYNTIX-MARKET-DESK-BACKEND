@@ -217,9 +217,16 @@ class MongoSignalRepository:
             {"status": "CANCELLED", "cancelled_at": {"$gte": cutoff}},
             {"lifecycle.status": "CANCELLED", "lifecycle.cancelled_at": {"$gte": cutoff}},
             {"status": "CANCELLED", "cancelled_at": {"$exists": False}, "created_at": {"$gte": cutoff}},
+            {"status": "CANCELLED", "cancelled_at": None, "created_at": {"$gte": cutoff}},
+            {"lifecycle.status": "CANCELLED", "lifecycle.cancelled_at": None, "created_at": {"$gte": cutoff}},
         ]}
         try:
-            cursor = self._collection.find(query).sort("created_at", -1).limit(max(1, min(int(limit), 200)))
+            cursor = (
+                self._collection.find(query)
+                .sort("created_at", -1)
+                .limit(max(1, min(int(limit), 200)))
+                .max_time_ms(3500)
+            )
             return self._query(cursor)
         except Exception as exc:
             self._raise_storage_error(exc)
