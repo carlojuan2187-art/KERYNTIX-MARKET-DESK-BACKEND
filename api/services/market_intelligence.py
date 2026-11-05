@@ -34,12 +34,15 @@ LIQ_STATUS_KEY = "market:liquidations:status:v1"
 MOVERS_COVERAGE_KEY = "market:movers:coverage:v1"
 REGIME_KEY = "market:regime:v1"
 RADAR_TTL = max(20, int(os.getenv("RADAR_CACHE_SECONDS", "60")))
-RADAR_REFRESH_RETRY_SECONDS = max(10, int(os.getenv("RADAR_REFRESH_RETRY_SECONDS", "30")))
+RADAR_REFRESH_RETRY_SECONDS = max(5, int(os.getenv("RADAR_REFRESH_RETRY_SECONDS", "10")))
 LIQ_TTL = 5
 MOVERS_TTL = 15
-RADAR_SYMBOL_LIMIT = max(8, min(30, int(os.getenv("RADAR_SYMBOL_LIMIT", "18"))))
+# The signal scanner still covers its full universe. Radar is a fast, liquid
+# shortlist and must not issue dozens of REST calls on a user's page request.
+RADAR_SYMBOL_LIMIT = max(8, min(30, int(os.getenv("RADAR_SYMBOL_LIMIT", "12"))))
 RADAR_CONCURRENCY = max(1, min(6, int(os.getenv("RADAR_CONCURRENCY", "4"))))
 TIMEFRAME_TREND_TTL = max(30, min(300, int(os.getenv("RADAR_TIMEFRAME_TREND_TTL", "60"))))
+TIMEFRAME_TREND_STALE_TTL = max(600, min(3600, int(os.getenv("RADAR_TIMEFRAME_TREND_STALE_TTL", "1800"))))
 MOVERS_SYMBOL_LIMIT = max(40, min(200, int(os.getenv("MOVERS_SYMBOL_LIMIT", "120"))))
 LIQ_EVENT_LIMIT = max(1000, min(100000, int(os.getenv("LIQUIDATION_API_EVENT_LIMIT", "30000"))))
 
@@ -113,6 +116,7 @@ class MarketIntelligenceService:
         self._movers_refresh_tasks: dict[int, asyncio.Task] = {}
         self._movers_retry_after: dict[int, float] = {}
         self._timeframe_trend_locks: dict[str, asyncio.Lock] = {}
+        self._timeframe_trend_tasks: dict[str, asyncio.Task] = {}
         self._timeframe_trend_semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
 
     @staticmethod
@@ -195,21 +199,25 @@ class MarketIntelligenceService:
                        if symbol.endswith("USDT") and _quote_volume(row) >= movers_engine.MIN_QUOTE_VOLUME][:RADAR_SYMBOL_LIMIT]
             semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
             errors = 0
+            trends_by_symbol: dict[str, dict[str, str | None]] = {}
 
             async def analyze(symbol: str) -> dict[str, Any] | None:
                 nonlocal errors
                 async with semaphore:
                     try:
-                        fetched = await asyncio.gather(
-                            self.rest.fetch_klines(symbol, "1h", 80),
-                            self.rest.fetch_klines(symbol, "15m", 160),
-                            self.rest.fetch_klines(symbol, "5m", 60),
-                            self.rest.fetch_klines(symbol, "4h", 80),
-                            return_exceptions=True,
+                        fetched = await asyncio.wait_for(
+                            asyncio.gather(
+                                self.rest.fetch_klines(symbol, "1h", 80),
+                                self.rest.fetch_klines(symbol, "15m", 160),
+                                self.rest.fetch_klines(symbol, "5m", 60),
+                                self.rest.fetch_klines(symbol, "4h", 80),
+                                return_exceptions=True,
+                            ),
+                            timeout=6.0,
                         )
-                        # Preserve the scanner's prior failure behavior for its three
-                        # required frames; a 4H-only outage should not erase an otherwise
-                        # valid opportunity, it should only leave that timeframe unread.
+                        # A missing 4H enrichment must not invalidate the actual radar
+                        # setup computed from 1H/15M/5M. Each fresh timeframe is used
+                        # independently and missing values preserve a recent valid read.
                         required_errors = [value for value in fetched[:3] if isinstance(value, Exception)]
                         if required_errors:
                             raise required_errors[0]
@@ -218,20 +226,28 @@ class MarketIntelligenceService:
                         item = radar_engine.analyze_symbol(
                             symbol, _frame_from_klines(f1h), _frame_from_klines(f15m), _frame_from_klines(f5m),
                         )
-                        # The radar's existing klines provide 15M/1H; the added 4H
-                        # series completes a real multi-timeframe read for this pair.
-                        trend_rows = {"15m": f15m, "1h": f1h, "4h": f4h}
-                        trend_values = await asyncio.to_thread(_timeframe_trends_from_rows, trend_rows)
+                        fresh_trends = await asyncio.to_thread(
+                            _timeframe_trends_from_rows, {"15m": f15m, "1h": f1h, "4h": f4h}
+                        )
+                        cache_key = f"market:timeframe-trends:v1:{symbol}"
+                        previous = await self.cache.get_json(cache_key)
+                        previous_trends = previous.get("trends") if isinstance(previous, dict) else {}
+                        previous_trends = previous_trends if isinstance(previous_trends, dict) else {}
+                        # A timeout, partial candle response or insufficient history
+                        # must never overwrite an earlier real trend with a blank dash.
+                        trend_values = {
+                            label: fresh_trends.get(label) or previous_trends.get(label)
+                            for label in ("15M", "1H", "4H")
+                        }
+                        trends_by_symbol[symbol] = trend_values
                         try:
                             await self.cache.set_json(
-                                f"market:timeframe-trends:v1:{symbol}",
+                                cache_key,
                                 {"trends": trend_values, "updated_at": utc_iso(self.clock()),
                                  "updated_epoch": self.clock(), "source": "binance-futures-klines"},
-                                ttl_seconds=TIMEFRAME_TREND_TTL,
+                                ttl_seconds=TIMEFRAME_TREND_STALE_TTL,
                             )
                         except Exception:
-                            # A cache write must not invalidate a radar scan based on
-                            # already-retrieved Binance candles.
                             logger.debug("No se pudo guardar tendencia multi-temporalidad de %s", symbol, exc_info=True)
                         if item:
                             item["timeframe_trend"] = trend_values
@@ -242,6 +258,16 @@ class MarketIntelligenceService:
                         return item
                     except Exception as exc:
                         errors += 1
+                        # If the scan failed, keep the last real read for the page.
+                        try:
+                            previous = await self.cache.get_json(f"market:timeframe-trends:v1:{symbol}")
+                            previous_trends = previous.get("trends") if isinstance(previous, dict) else {}
+                            if isinstance(previous_trends, dict):
+                                trends_by_symbol[symbol] = {
+                                    label: previous_trends.get(label) for label in ("15M", "1H", "4H")
+                                }
+                        except Exception:
+                            pass
                         logger.debug("Radar: no se pudo analizar %s: %s", symbol, exc)
                         return None
 
@@ -268,11 +294,10 @@ class MarketIntelligenceService:
                                         "score": radar_engine.sweep_score(sweep, alignment["status"], now)})
             snapshot["sweeps"] = enriched_sweeps
             snapshot["items"] = [item for item in items if item]
-            snapshot["timeframe_trends"] = {
-                str(item.get("symbol")): item.get("timeframe_trend")
-                for item in snapshot["items"]
-                if item.get("symbol") and isinstance(item.get("timeframe_trend"), dict)
-            }
+            # Include trend reads for every scanned symbol, not only assets that
+            # also passed the opportunity filters. Active user setups may belong to
+            # a scanned symbol that is not itself in the final watch/movers arrays.
+            snapshot["timeframe_trends"] = trends_by_symbol
             snapshot["status"] = "ok" if not errors else ("partial" if snapshot["scanned"] else "degraded")
             snapshot["analysis_errors"] = errors
             snapshot["updated_at"] = utc_iso(now)
