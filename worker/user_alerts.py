@@ -87,6 +87,7 @@ class UserAlertProcessor:
     def __init__(self, auth_repository: AuthRepository, feature_repository: UserFeatureRepository,
                  cache: JsonCache, telegram_gateway: Any | None = None, *, clock=time.time,
                  max_telegram_per_cycle: int = 20, market_intelligence: Any | None = None,
+                 signal_repository: Any | None = None,
                  page_size: int | None = None, notify_concurrency: int | None = None) -> None:
         self.auth = auth_repository
         self.features = feature_repository
@@ -95,6 +96,7 @@ class UserAlertProcessor:
         self.clock = clock
         self.max_telegram_per_cycle = max(0, min(100, int(max_telegram_per_cycle)))
         self.market_intelligence = market_intelligence
+        self.signal_repository = signal_repository
         self.page_size = max(50, min(2000, int(page_size if page_size is not None else _env_int("ALERT_DISPATCH_PAGE_SIZE", 500, low=50, high=2000))))
         self.notify_concurrency = max(1, min(32, int(notify_concurrency if notify_concurrency is not None else _env_int("ALERT_DISPATCH_CONCURRENCY", 12, low=1, high=32))))
         self._telegram_sent = 0
@@ -369,6 +371,18 @@ class UserAlertProcessor:
                 except Exception:
                     logger.exception("No se pudo encolar notificación de señal para usuario %s", user_id)
                     return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
+                if made and self.signal_repository is not None:
+                    try:
+                        await asyncio.to_thread(
+                            self.signal_repository.record_user_deliveries,
+                            user_id,
+                            [signal_id],
+                            delivered_at=current,
+                        )
+                    except Exception:
+                        # The durable notification has already been enqueued. Keep
+                        # delivery running and let the API feed provide a retry path.
+                        logger.exception("No se pudo registrar la entrega personal de señal para %s", user_id)
                 return {
                     "notifications_created": int(made),
                     "telegram_queued": int(made and telegram_queued),
