@@ -25,8 +25,15 @@ def entitlement_intervals(claims: Mapping[str, Any]) -> list[tuple[datetime, dat
             if start is not None and end is not None and end > start:
                 intervals.append((start, end))
 
-    # Legacy Premium records may predate plan_history.
-    if not intervals:
+    # Legacy Premium records may predate plan_history. Keep a trial interval
+    # as well; the Premium fallback is independent from the trial window.
+    has_history_period = any(
+        isinstance(item, Mapping)
+        and _parse_datetime(item.get("effective_start")) is not None
+        and _parse_datetime(item.get("effective_end")) is not None
+        for item in history
+    ) if isinstance(history, Sequence) and not isinstance(history, (str, bytes)) else False
+    if not has_history_period and str(claims.get("plan") or "").lower() == "premium":
         start = _parse_datetime(claims.get("plan_updated_at")) or created
         end = _parse_datetime(claims.get("plan_end"))
         if start is not None and end is not None and end > start:
