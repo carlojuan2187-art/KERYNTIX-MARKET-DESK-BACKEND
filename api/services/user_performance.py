@@ -84,11 +84,8 @@ def personal_result_rows(
         return []
 
     results = result_reader(signal_ids)
-    if is_admin:
-        return list(results)
-
-    intervals = entitlement_intervals(claims)
-    if not intervals:
+    intervals = [] if is_admin else entitlement_intervals(claims)
+    if not is_admin and not intervals:
         return []
 
     delivered_at_by_id = {
@@ -105,7 +102,7 @@ def personal_result_rows(
         # operation delivered to the user while it was actionable.
         if delivered_at is None or closed_at is None or closed_at < delivered_at:
             continue
-        if _closed_during_entitlement(closed_at, intervals):
+        if is_admin or _closed_during_entitlement(closed_at, intervals):
             eligible.append(row)
     eligible.sort(key=lambda row: _parse_datetime(row.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc))
     return eligible
