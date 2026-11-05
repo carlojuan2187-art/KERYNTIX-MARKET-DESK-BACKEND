@@ -134,11 +134,11 @@ async def list_signals(
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=4.25)
     except asyncio.TimeoutError as exc:
-        if cached_items is not None:
+        if cached_items is not None and cached_age <= 12.0:
             return cached_items
         raise HTTPException(status_code=503, detail={"code": "SIGNALS_WARMING", "message": "Las señales se están actualizando. Vuelve a intentarlo en unos segundos."}) from exc
     except RepositoryUnavailable as exc:
-        if cached_items is not None:
+        if cached_items is not None and cached_age <= 12.0:
             return cached_items
         raise HTTPException(status_code=503, detail={"code": "DATA_UNAVAILABLE", "message": "Los datos de señales no están disponibles temporalmente."}) from exc
     except SignalDataIntegrityError as exc:
