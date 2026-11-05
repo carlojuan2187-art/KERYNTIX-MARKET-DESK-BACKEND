@@ -15,6 +15,9 @@ class SignalRepository(Protocol):
     def latest_by_symbol(self, symbol: str) -> Mapping[str, Any] | None: ...
     def list_results(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
     def list_results_for_period(self, *, start: datetime | None = None) -> list[Mapping[str, Any]]: ...
+    def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None: ...
+    def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]: ...
+    def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]: ...
     def create_signal_if_not_duplicate(
         self, document: Mapping[str, Any], *, dedupe_minutes: int = 10
     ) -> bool: ...
@@ -52,6 +55,7 @@ class InMemorySignalRepository:
                  results: Sequence[Mapping[str, Any]] | None = None) -> None:
         self._documents = [dict(doc) for doc in (documents or [])]
         self._results = [dict(row) for row in (results or [])]
+        self._user_deliveries: dict[tuple[str, str], dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def list_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
@@ -90,6 +94,48 @@ class InMemorySignalRepository:
                 return dict(doc)
         return None
 
+    def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None:
+        moment = _parse_datetime(delivered_at) or datetime.now(timezone.utc)
+        try:
+            for raw_id in dict.fromkeys(str(value).strip() for value in signal_ids if str(value).strip()):
+                self._deliveries_collection.update_one(
+                    {"user_id": str(user_id), "signal_id": raw_id},
+                    {"$setOnInsert": {"user_id": str(user_id), "signal_id": raw_id, "delivered_at": moment}},
+                    upsert=True,
+                )
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]:
+        query: dict[str, Any] = {"user_id": str(user_id)}
+        if start is not None:
+            query["delivered_at"] = {"$gte": _parse_datetime(start) or start}
+        try:
+            rows = []
+            for raw in self._deliveries_collection.find(query).sort("delivered_at", 1):
+                item = dict(raw)
+                item.pop("_id", None)
+                rows.append(item)
+            return rows
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]:
+        ids = list(dict.fromkeys(str(value) for value in signal_ids if str(value)))
+        if not ids:
+            return []
+        try:
+            rows = []
+            for raw in self._results_collection.find({"signal_id": {"$in": ids}}):
+                item = dict(raw)
+                item.pop("_id", None)
+                if not item.get("id"):
+                    item["id"] = str(item.get("signal_id") or "")
+                rows.append(item)
+            return rows
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
     def create_signal_if_not_duplicate(
         self, document: Mapping[str, Any], *, dedupe_minutes: int = 10
     ) -> bool:
@@ -121,6 +167,30 @@ class InMemorySignalRepository:
             rows = [row for row in rows if (_parse_datetime(row.get("closed_at")) is not None and _parse_datetime(row.get("closed_at")) >= cutoff)]
         return rows
 
+    def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None:
+        moment = _parse_datetime(delivered_at) or datetime.now(timezone.utc)
+        with self._lock:
+            for raw_id in signal_ids:
+                signal_id = str(raw_id or "").strip()
+                if signal_id:
+                    key = (str(user_id), signal_id)
+                    self._user_deliveries.setdefault(key, {
+                        "user_id": str(user_id), "signal_id": signal_id, "delivered_at": moment,
+                    })
+
+    def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]:
+        cutoff = _parse_datetime(start) if start is not None else None
+        with self._lock:
+            rows = [dict(row) for (owner, _), row in self._user_deliveries.items() if owner == str(user_id)]
+        if cutoff is not None:
+            rows = [row for row in rows if (_parse_datetime(row.get("delivered_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= cutoff]
+        return sorted(rows, key=lambda row: _parse_datetime(row.get("delivered_at")) or datetime.min.replace(tzinfo=timezone.utc))
+
+    def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]:
+        wanted = {str(value) for value in signal_ids if str(value)}
+        with self._lock:
+            return [dict(row) for row in self._results if str(row.get("signal_id") or row.get("id") or "") in wanted]
+
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "adapter": "memory", "persistent": False}
 
@@ -128,16 +198,19 @@ class InMemorySignalRepository:
 class MongoSignalRepository:
     """MongoDB adapter for persisted signals, including atomic scanner deduplication."""
 
-    def __init__(self, collection: Any, client: Any, *, database_name: str, results_collection: Any | None = None) -> None:
+    def __init__(self, collection: Any, client: Any, *, database_name: str, results_collection: Any | None = None, deliveries_collection: Any | None = None) -> None:
         self._collection = collection
         self._client = client
         self._database_name = database_name
         self._results_collection = (
             results_collection
             if results_collection is not None
-            else client[database_name][
-                os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")
-            ]
+            else client[database_name][os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")]
+        )
+        self._deliveries_collection = (
+            deliveries_collection
+            if deliveries_collection is not None
+            else client[database_name][os.getenv("USER_SIGNAL_DELIVERIES_COLLECTION", "user_signal_deliveries")]
         )
 
     @classmethod
@@ -162,6 +235,7 @@ class MongoSignalRepository:
         db = client[database_name]
         signal_collection = db[os.getenv("SIGNALS_COLLECTION", "signals")]
         result_collection = db[os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")]
+        deliveries_collection = db[os.getenv("USER_SIGNAL_DELIVERIES_COLLECTION", "user_signal_deliveries")]
         try:
             # These endpoints repeatedly read the newest signal documents. Without
             # this index MongoDB must scan and sort the entire signals collection;
@@ -174,10 +248,12 @@ class MongoSignalRepository:
             signal_collection.create_index([("outcome.state", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
+            deliveries_collection.create_index([("user_id", 1), ("signal_id", 1)], unique=True, name="uniq_user_signal_delivery")
+            deliveries_collection.create_index([("user_id", 1), ("delivered_at", 1)], name="user_signal_delivery_time")
         except Exception:
             client.close()
             raise
-        return cls(signal_collection, client, database_name=database_name, results_collection=result_collection)
+        return cls(signal_collection, client, database_name=database_name, results_collection=result_collection, deliveries_collection=deliveries_collection)
 
     def _query(self, cursor: Any) -> list[Mapping[str, Any]]:
         try:
