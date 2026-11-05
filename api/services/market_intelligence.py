@@ -318,9 +318,6 @@ class MarketIntelligenceService:
             logger.warning("No se pudo adquirir el bloqueo compartido del radar", exc_info=True)
             acquired = True
         if not acquired:
-            cached = await self.cache.get_json(RADAR_KEY)
-            if isinstance(cached, dict):
-                return cached
             raise _RefreshLeaseBusy("El escaneo de Radar ya está activo en otra instancia.")
         try:
             return await self._build_radar_snapshot(force_refresh=force_refresh)
