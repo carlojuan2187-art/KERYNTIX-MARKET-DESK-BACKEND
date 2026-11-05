@@ -7,7 +7,7 @@ from api.repositories.signals import RepositoryUnavailable
 from api.security import Principal, require_analytical_access
 from api.services.stats_baseline import get_reset_at
 from api.services.user_performance import personal_result_rows
-from engine.performance import build_performance, period_start
+from engine.performance import build_performance
 
 router = APIRouter(prefix="/results", tags=["performance"])
 
