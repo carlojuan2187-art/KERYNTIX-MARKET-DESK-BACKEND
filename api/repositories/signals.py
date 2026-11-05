@@ -306,15 +306,20 @@ class MongoSignalRepository:
 
     def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None:
         moment = _parse_datetime(delivered_at) or datetime.now(timezone.utc)
-        try:
-            for raw_id in dict.fromkeys(str(value).strip() for value in signal_ids if str(value).strip()):
+        for raw_id in dict.fromkeys(str(value).strip() for value in signal_ids if str(value).strip()):
+            try:
                 self._deliveries_collection.update_one(
                     {"user_id": str(user_id), "signal_id": raw_id},
                     {"$setOnInsert": {"user_id": str(user_id), "signal_id": raw_id, "delivered_at": moment}},
                     upsert=True,
                 )
-        except Exception as exc:
-            self._raise_storage_error(exc)
+            except Exception as exc:
+                # The feed and notification worker can record the same signal at
+                # almost the same instant. The unique index makes that idempotent;
+                # a concurrent duplicate insert is therefore success, not an outage.
+                if getattr(exc, "code", None) == 11000:
+                    continue
+                self._raise_storage_error(exc)
 
     def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]:
         query: dict[str, Any] = {"user_id": str(user_id)}
