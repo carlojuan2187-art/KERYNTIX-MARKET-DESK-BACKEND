@@ -94,48 +94,6 @@ class InMemorySignalRepository:
                 return dict(doc)
         return None
 
-    def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None:
-        moment = _parse_datetime(delivered_at) or datetime.now(timezone.utc)
-        try:
-            for raw_id in dict.fromkeys(str(value).strip() for value in signal_ids if str(value).strip()):
-                self._deliveries_collection.update_one(
-                    {"user_id": str(user_id), "signal_id": raw_id},
-                    {"$setOnInsert": {"user_id": str(user_id), "signal_id": raw_id, "delivered_at": moment}},
-                    upsert=True,
-                )
-        except Exception as exc:
-            self._raise_storage_error(exc)
-
-    def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]:
-        query: dict[str, Any] = {"user_id": str(user_id)}
-        if start is not None:
-            query["delivered_at"] = {"$gte": _parse_datetime(start) or start}
-        try:
-            rows = []
-            for raw in self._deliveries_collection.find(query).sort("delivered_at", 1):
-                item = dict(raw)
-                item.pop("_id", None)
-                rows.append(item)
-            return rows
-        except Exception as exc:
-            self._raise_storage_error(exc)
-
-    def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]:
-        ids = list(dict.fromkeys(str(value) for value in signal_ids if str(value)))
-        if not ids:
-            return []
-        try:
-            rows = []
-            for raw in self._results_collection.find({"signal_id": {"$in": ids}}):
-                item = dict(raw)
-                item.pop("_id", None)
-                if not item.get("id"):
-                    item["id"] = str(item.get("signal_id") or "")
-                rows.append(item)
-            return rows
-        except Exception as exc:
-            self._raise_storage_error(exc)
-
     def create_signal_if_not_duplicate(
         self, document: Mapping[str, Any], *, dedupe_minutes: int = 10
     ) -> bool:
@@ -337,6 +295,48 @@ class MongoSignalRepository:
             cursor = self._results_collection.find(query).sort("closed_at", 1)
             rows = []
             for raw in cursor:
+                item = dict(raw)
+                item.pop("_id", None)
+                if not item.get("id"):
+                    item["id"] = str(item.get("signal_id") or "")
+                rows.append(item)
+            return rows
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def record_user_deliveries(self, user_id: str, signal_ids: Sequence[str], *, delivered_at: datetime) -> None:
+        moment = _parse_datetime(delivered_at) or datetime.now(timezone.utc)
+        try:
+            for raw_id in dict.fromkeys(str(value).strip() for value in signal_ids if str(value).strip()):
+                self._deliveries_collection.update_one(
+                    {"user_id": str(user_id), "signal_id": raw_id},
+                    {"$setOnInsert": {"user_id": str(user_id), "signal_id": raw_id, "delivered_at": moment}},
+                    upsert=True,
+                )
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_user_deliveries(self, user_id: str, *, start: datetime | None = None) -> list[Mapping[str, Any]]:
+        query: dict[str, Any] = {"user_id": str(user_id)}
+        if start is not None:
+            query["delivered_at"] = {"$gte": _parse_datetime(start) or start}
+        try:
+            rows = []
+            for raw in self._deliveries_collection.find(query).sort("delivered_at", 1):
+                item = dict(raw)
+                item.pop("_id", None)
+                rows.append(item)
+            return rows
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]:
+        ids = list(dict.fromkeys(str(value) for value in signal_ids if str(value)))
+        if not ids:
+            return []
+        try:
+            rows = []
+            for raw in self._results_collection.find({"signal_id": {"$in": ids}}):
                 item = dict(raw)
                 item.pop("_id", None)
                 if not item.get("id"):
