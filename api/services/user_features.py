@@ -243,8 +243,9 @@ class WatchlistService:
             rows = []
             if self.sweep_store is not None:
                 try:
-                    active = await asyncio.to_thread(
-                        self.sweep_store.load_active, now=datetime.fromtimestamp(now, tz=UTC)
+                    active = await asyncio.wait_for(
+                        asyncio.to_thread(self.sweep_store.load_active, now=datetime.fromtimestamp(now, tz=UTC)),
+                        timeout=1.5,
                     )
                     for key, raw in (active or {}).items():
                         if not isinstance(raw, Mapping):
@@ -311,7 +312,10 @@ class WatchlistService:
         return user
 
     async def list(self, user_id: str) -> dict[str, Any]:
-        user = self._user(user_id)
+        try:
+            user = await asyncio.wait_for(asyncio.to_thread(self._user, user_id), timeout=2.5)
+        except asyncio.TimeoutError as exc:
+            raise _http("USER_FEATURES_UNAVAILABLE", 503, "La cuenta está tardando en responder. Vuelve a intentarlo en unos segundos.") from exc
         symbols = user_symbols(user)
         if not symbols:
             # An empty watchlist has no market analysis to perform. Avoid the
