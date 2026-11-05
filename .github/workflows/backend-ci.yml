@@ -26,7 +26,7 @@ jobs:
           PYTHONPATH: .
         run: python -m pytest -q --disable-warnings --maxfail=1
       - name: Compile all Python modules
-        run: python -m compileall -q api domain engine worker main.py scripts tests
+        run: python -m compileall -q api domain engine worker main.py scripts test
       - name: Run release preflight
         env:
           PYTHONPATH: .
