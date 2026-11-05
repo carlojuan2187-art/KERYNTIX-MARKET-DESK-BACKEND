@@ -115,11 +115,12 @@ def test_signal_rows_are_shared_and_reused_across_screen_requests():
         cache = InMemoryJsonCache()
         repository = CountingRepository()
         service = MarketIntelligenceService(cache, BlockingMarketRest(), repository, InMemorySweepStore())
+        second_instance = MarketIntelligenceService(cache, BlockingMarketRest(), repository, InMemorySweepStore())
         first, refreshing, updated_at = await service.signal_records(wait_seconds=1.0)
         assert not refreshing
         assert first and first[0]["symbol"] == "BTCUSDT"
         assert updated_at
-        second, refreshing_again, updated_at_again = await service.signal_records()
+        second, refreshing_again, updated_at_again = await second_instance.signal_records()
         assert second == first
         assert not refreshing_again
         assert updated_at_again == updated_at
@@ -151,5 +152,50 @@ def test_missing_radar_trends_return_immediately_while_provider_is_slow():
         assert task is not None
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+    run(scenario())
+
+
+def test_only_one_radar_scan_can_hold_the_shared_redis_lease():
+    from api.repositories.signals import InMemorySignalRepository
+    from api.repositories.sweeps import InMemorySweepStore
+    from api.services.market_intelligence import MarketIntelligenceService, _RefreshLeaseBusy
+
+    class SlowRadarRest:
+        def __init__(self):
+            self.calls = 0
+            self.started = asyncio.Event()
+
+        async def fetch_klines(self, *args, **kwargs):
+            self.calls += 1
+            self.started.set()
+            await asyncio.Future()
+
+    async def scenario():
+        cache = InMemoryJsonCache()
+        await cache.set_json(QUOTES_KEY, {
+            "BTCUSDT": {
+                "symbol": "BTCUSDT",
+                "price": 70000,
+                "volume_24h": 2_000_000_000,
+            },
+        }, ttl_seconds=120)
+        rest = SlowRadarRest()
+        first = MarketIntelligenceService(cache, rest, InMemorySignalRepository([]), InMemorySweepStore())
+        second = MarketIntelligenceService(cache, rest, InMemorySignalRepository([]), InMemorySweepStore())
+
+        active = asyncio.create_task(first._build_radar_snapshot_with_lease(force_refresh=True))
+        await asyncio.wait_for(rest.started.wait(), timeout=0.5)
+        await asyncio.sleep(0)
+        try:
+            try:
+                await second._build_radar_snapshot_with_lease(force_refresh=True)
+                raise AssertionError("A second instance must not start the same Radar scan")
+            except _RefreshLeaseBusy:
+                pass
+            assert rest.calls == 4
+        finally:
+            active.cancel()
+            await asyncio.gather(active, return_exceptions=True)
 
     run(scenario())
