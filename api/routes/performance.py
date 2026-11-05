@@ -5,7 +5,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.repositories.signals import RepositoryUnavailable
 from api.security import Principal, require_analytical_access
-from api.services.stats_baseline import get_reset_at, latest_start, rows_since
+from api.services.stats_baseline import get_reset_at
+from api.services.user_performance import personal_result_rows
 from engine.performance import build_performance, period_start
 
 router = APIRouter(prefix="/results", tags=["performance"])
@@ -19,9 +20,14 @@ def get_performance(
 ) -> dict:
     try:
         reset_at = get_reset_at(request.app.state.business_repository)
-        start = latest_start(period_start(period), reset_at)
         repository = request.app.state.signal_repository
-        rows = rows_since(repository.list_results_for_period(start=start), reset_at)
+        rows = personal_result_rows(
+            repository,
+            user_id=_principal.user_id,
+            claims=_principal.claims,
+            reset_at=reset_at,
+            is_admin=_principal.is_admin,
+        )
         return build_performance(rows, period=period)
     except RepositoryUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "DATA_UNAVAILABLE", "message": "El histórico de resultados no está disponible temporalmente."}) from exc
