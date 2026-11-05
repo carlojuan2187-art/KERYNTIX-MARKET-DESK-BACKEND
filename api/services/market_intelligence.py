@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
@@ -28,6 +29,10 @@ from engine import radar as radar_engine
 from worker.binance_rest import BinanceDataError, BinanceRestClient
 
 logger = logging.getLogger("ftrade.market_intelligence")
+
+
+class _RefreshLeaseBusy(RuntimeError):
+    """Another Railway instance already owns this shared background refresh."""
 
 RADAR_KEY = "market:radar:v1"
 SIGNAL_RECORDS_KEY = "market:signal-records:v1"
@@ -121,6 +126,8 @@ class MarketIntelligenceService:
         self._signal_records_lock = asyncio.Lock()
         self._signal_records_refresh_task: asyncio.Task | None = None
         self._signal_records_retry_after = 0.0
+        self._signal_records_lease_key = "market:signal-records:refresh-lock:v1"
+        self._radar_lease_key = "market:radar:refresh-lock:v1"
 
     async def signal_records(
         self, *, wait_seconds: float = 0.0,
@@ -188,7 +195,9 @@ class MarketIntelligenceService:
                 error = done.exception()
             except asyncio.CancelledError:
                 return
-            if error is not None:
+            if isinstance(error, _RefreshLeaseBusy):
+                self._signal_records_retry_after = self.clock() + 2.0
+            elif error is not None:
                 self._signal_records_retry_after = self.clock() + 15.0
                 logger.warning("No se pudo refrescar el snapshot compartido de señales: %s", error)
             else:
@@ -198,40 +207,61 @@ class MarketIntelligenceService:
         return task
 
     async def _refresh_signal_records(self) -> None:
-        async with self._signal_records_lock:
+        token = uuid.uuid4().hex
+        try:
+            acquired = await self.cache.acquire_lease(
+                self._signal_records_lease_key, token, ttl_seconds=12,
+            )
+        except Exception:
+            # Cache errors are already visible to the caller; keep this process
+            # protected by its local single-flight lock as a best effort.
+            logger.warning("No se pudo adquirir el bloqueo compartido de señales", exc_info=True)
+            acquired = True
+        if not acquired:
+            raise _RefreshLeaseBusy("La actualización de señales ya está activa en otra instancia.")
+        try:
+            await self._refresh_signal_records_unlocked()
+        finally:
             try:
-                cutoff = datetime.fromtimestamp(self.clock(), tz=timezone.utc) - timedelta(minutes=30)
-                reader = getattr(self.repository, "list_live_candidates", None)
-                if callable(reader):
-                    rows = await asyncio.wait_for(
-                        asyncio.to_thread(reader, limit=80, cancelled_since=cutoff),
-                        timeout=5.0,
-                    )
-                else:
-                    rows = await asyncio.wait_for(
-                        asyncio.to_thread(self.repository.list_signals, limit=100),
-                        timeout=5.0,
-                    )
-                safe_rows: list[dict[str, Any]] = []
-                for raw in rows:
-                    row = dict(raw)
-                    if row.get("_id") is not None and not row.get("id"):
-                        row["id"] = str(row["_id"])
-                    row.pop("_id", None)
-                    encoded = jsonable_encoder(row)
-                    if isinstance(encoded, dict):
-                        safe_rows.append(encoded)
-                now = self.clock()
-                snapshot = {
-                    "rows": safe_rows,
-                    "updated_at": utc_iso(now),
-                    "updated_epoch": now,
-                }
-                await self.cache.set_json(SIGNAL_RECORDS_KEY, snapshot, ttl_seconds=180)
-                self._signal_records_retry_after = 0.0
+                await self.cache.release_lease(self._signal_records_lease_key, token)
             except Exception:
-                self._signal_records_retry_after = self.clock() + 15.0
-                logger.warning("Actualización de señales agotó su plazo o falló", exc_info=True)
+                logger.debug("No se pudo liberar el bloqueo compartido de señales", exc_info=True)
+
+    async def _refresh_signal_records_unlocked(self) -> None:
+            async with self._signal_records_lock:
+                try:
+                    cutoff = datetime.fromtimestamp(self.clock(), tz=timezone.utc) - timedelta(minutes=30)
+                    reader = getattr(self.repository, "list_live_candidates", None)
+                    if callable(reader):
+                        rows = await asyncio.wait_for(
+                            asyncio.to_thread(reader, limit=80, cancelled_since=cutoff),
+                            timeout=5.0,
+                        )
+                    else:
+                        rows = await asyncio.wait_for(
+                            asyncio.to_thread(self.repository.list_signals, limit=100),
+                            timeout=5.0,
+                        )
+                    safe_rows: list[dict[str, Any]] = []
+                    for raw in rows:
+                        row = dict(raw)
+                        if row.get("_id") is not None and not row.get("id"):
+                            row["id"] = str(row["_id"])
+                        row.pop("_id", None)
+                        encoded = jsonable_encoder(row)
+                        if isinstance(encoded, dict):
+                            safe_rows.append(encoded)
+                    now = self.clock()
+                    snapshot = {
+                        "rows": safe_rows,
+                        "updated_at": utc_iso(now),
+                        "updated_epoch": now,
+                    }
+                    await self.cache.set_json(SIGNAL_RECORDS_KEY, snapshot, ttl_seconds=180)
+                    self._signal_records_retry_after = 0.0
+                except Exception:
+                    self._signal_records_retry_after = self.clock() + 15.0
+                    logger.warning("Actualización de señales agotó su plazo o falló", exc_info=True)
 
     @staticmethod
     def _warming_radar_snapshot(now: float) -> dict[str, Any]:
@@ -250,7 +280,7 @@ class MarketIntelligenceService:
         if self.clock() < self._radar_retry_after:
             return
         try:
-            task = asyncio.create_task(self._build_radar_snapshot(force_refresh=True))
+            task = asyncio.create_task(self._build_radar_snapshot_with_lease(force_refresh=True))
         except RuntimeError:
             logger.warning("No se pudo programar la actualización del radar: no hay event loop activo")
             return
@@ -263,13 +293,35 @@ class MarketIntelligenceService:
                 error = done.exception()
             except asyncio.CancelledError:
                 return
-            if error is not None:
+            if isinstance(error, _RefreshLeaseBusy):
+                self._radar_retry_after = self.clock() + 3.0
+            elif error is not None:
                 self._radar_retry_after = self.clock() + RADAR_REFRESH_RETRY_SECONDS
                 logger.warning("La actualización en segundo plano del radar falló: %s", error)
             else:
                 self._radar_retry_after = 0.0
 
         task.add_done_callback(_report_failure)
+
+    async def _build_radar_snapshot_with_lease(self, *, force_refresh: bool = True) -> dict[str, Any]:
+        token = uuid.uuid4().hex
+        try:
+            acquired = await self.cache.acquire_lease(self._radar_lease_key, token, ttl_seconds=90)
+        except Exception:
+            logger.warning("No se pudo adquirir el bloqueo compartido del radar", exc_info=True)
+            acquired = True
+        if not acquired:
+            cached = await self.cache.get_json(RADAR_KEY)
+            if isinstance(cached, dict):
+                return cached
+            raise _RefreshLeaseBusy("El escaneo de Radar ya está activo en otra instancia.")
+        try:
+            return await self._build_radar_snapshot(force_refresh=force_refresh)
+        finally:
+            try:
+                await self.cache.release_lease(self._radar_lease_key, token)
+            except Exception:
+                logger.debug("No se pudo liberar el bloqueo compartido del radar", exc_info=True)
 
     async def radar(self, *, force_refresh: bool = False) -> dict[str, Any]:
         """Return a cached radar immediately; build cold/stale snapshots in background.
@@ -280,12 +332,14 @@ class MarketIntelligenceService:
         """
         now = self.clock()
         if force_refresh:
-            return await self._build_radar_snapshot(force_refresh=True)
+            return await self._build_radar_snapshot_with_lease(force_refresh=True)
 
         cached = await self.cache.get_json(RADAR_KEY)
         if isinstance(cached, dict):
             age = now - float(cached.get("updated_epoch", 0) or 0)
             if 0 <= age < RADAR_TTL:
+                if cached.get("refreshing"):
+                    self._schedule_radar_refresh()
                 return cached
             self._schedule_radar_refresh()
             stale = dict(cached)
