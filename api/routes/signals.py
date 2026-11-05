@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from api.repositories.signals import RepositoryUnavailable
 from api.schemas import SignalApiResponse
-from domain.signals import CanonicalSignalResult, OutcomeState
+from domain.signals import CanonicalSignalResult
 from api.security import Principal, require_analytical_access
 from api.services.signals import SignalDataIntegrityError, SignalService
 from api.services.stats_baseline import get_reset_at
