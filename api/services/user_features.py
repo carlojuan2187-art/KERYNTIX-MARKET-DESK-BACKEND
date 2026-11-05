@@ -96,7 +96,7 @@ class WatchlistService:
         self.signals = signal_repository
         self.sweep_store = sweep_store
         self.clock = clock
-        self._analysis_semaphore = asyncio.Semaphore(4)
+        self._analysis_semaphore = asyncio.Semaphore(2)
         self._symbol_locks: dict[str, asyncio.Lock] = {}
         self._analysis_refresh_tasks: dict[str, asyncio.Task] = {}
         self._analysis_retry_after: dict[str, float] = {}
@@ -326,15 +326,25 @@ class WatchlistService:
                 "status": "empty", "source": "user-watchlist",
                 "updated_at": None, "analysis_status": "empty",
             }
-        quotes, status, updated_at = await self._quote_map()
-        try:
+        async def load_active_signals() -> list[Mapping[str, Any]]:
             active_reader = getattr(self.signals, "list_active_signals", None)
             reader = active_reader if callable(active_reader) else self.signals.list_signals
-            signals = await asyncio.wait_for(asyncio.to_thread(reader, limit=150), timeout=3.0)
-        except Exception:
-            # Watchlist prices and cached technical reads remain available even if
-            # MongoDB cannot provide active-signal annotations on this request.
-            signals = []
+            return await asyncio.wait_for(asyncio.to_thread(reader, limit=150), timeout=2.5)
+
+        # These three reads are independent. Running them concurrently keeps a
+        # cold Watchlist load bounded by the slowest source, not their total time.
+        quote_result, signal_result, sweep_result = await asyncio.gather(
+            self._quote_map(),
+            load_active_signals(),
+            self._recent_sweeps(symbols),
+            return_exceptions=True,
+        )
+        if isinstance(quote_result, Exception):
+            quotes, status, updated_at = {}, "unavailable", None
+        else:
+            quotes, status, updated_at = quote_result
+        signals = signal_result if isinstance(signal_result, list) else []
+        sweeps = sweep_result if isinstance(sweep_result, dict) else {}
         active: dict[str, dict[str, Any]] = {}
         for signal in signals:
             symbol = str(signal.get("symbol") or "").upper()
@@ -359,7 +369,6 @@ class WatchlistService:
         # cache TTL rather than once per user, matching the original Telegram watchlist.
         analyses_by_symbol = await asyncio.gather(*(self._symbol_analysis(symbol) for symbol in symbols)) if symbols else []
         analyses_map = dict(zip(symbols, analyses_by_symbol))
-        sweeps = await self._recent_sweeps(symbols) if symbols else {}
         items = []
         for symbol in symbols:
             quote = quotes.get(symbol)
