@@ -309,8 +309,29 @@ class MarketIntelligenceService:
             if not quotes:
                 raise AnalyticsIntelligenceUnavailable("RADAR_QUOTES_UNAVAILABLE")
             sorted_quotes = sorted(quotes.items(), key=lambda pair: _quote_volume(pair[1]), reverse=True)
-            symbols = [symbol for symbol, row in sorted_quotes
-                       if symbol.endswith("USDT") and _quote_volume(row) >= movers_engine.MIN_QUOTE_VOLUME][:RADAR_SYMBOL_LIMIT]
+            symbols = [
+                symbol for symbol, row in sorted_quotes
+                if symbol.endswith("USDT") and _quote_volume(row) >= movers_engine.MIN_QUOTE_VOLUME
+            ][:RADAR_SYMBOL_LIMIT]
+
+            # Load the non-candle inputs once. They are reused for incremental
+            # snapshots so early results can be displayed before the full scan ends.
+            sweeps: list[dict[str, Any]] = []
+            try:
+                active = await asyncio.to_thread(
+                    self.sweep_store.load_active,
+                    now=datetime.fromtimestamp(now, tz=timezone.utc),
+                )
+                sweeps = list(active.values()) if isinstance(active, dict) else []
+            except Exception as exc:
+                logger.warning("Radar: observaciones de barrido no disponibles: %s", exc)
+            funding_rows = await self.cache.get_json(FUNDING_KEY)
+            funding = {
+                str(row.get("symbol")): _finite(row.get("lastFundingRate"))
+                for row in funding_rows if isinstance(row, dict) and row.get("symbol")
+                and _finite(row.get("lastFundingRate")) is not None
+            } if isinstance(funding_rows, list) else {}
+            regime = await self.cache.get_json(REGIME_KEY)
             semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
             errors = 0
 
@@ -328,9 +349,8 @@ class MarketIntelligenceService:
                             ),
                             timeout=12.0,
                         )
-                        # Preserve the scanner's prior failure behavior for its three
-                        # required frames; a 4H-only outage should not erase an otherwise
-                        # valid opportunity, it should only leave that timeframe unread.
+                        # 4H is supplementary; a failure there does not erase a
+                        # valid 15M/1H/5M opportunity.
                         required_errors = [value for value in fetched[:3] if isinstance(value, Exception)]
                         if required_errors:
                             raise required_errors[0]
@@ -339,25 +359,25 @@ class MarketIntelligenceService:
                         item = radar_engine.analyze_symbol(
                             symbol, _frame_from_klines(f1h), _frame_from_klines(f15m), _frame_from_klines(f5m),
                         )
-                        # The radar's existing klines provide 15M/1H; the added 4H
-                        # series completes a real multi-timeframe read for this pair.
                         trend_rows = {"15m": f15m, "1h": f1h, "4h": f4h}
                         trend_values = await asyncio.to_thread(_timeframe_trends_from_rows, trend_rows)
-                        try:
-                            await self.cache.set_json(
-                                f"market:timeframe-trends:v1:{symbol}",
-                                {"trends": trend_values, "updated_at": utc_iso(self.clock()),
-                                 "updated_epoch": self.clock(), "source": "binance-futures-klines"},
-                                ttl_seconds=TIMEFRAME_TREND_TTL,
-                            )
-                        except Exception:
-                            # A cache write must not invalidate a radar scan based on
-                            # already-retrieved Binance candles.
-                            logger.debug("No se pudo guardar tendencia multi-temporalidad de %s", symbol, exc_info=True)
+                        if any(value is not None for value in trend_values.values()):
+                            try:
+                                await self.cache.set_json(
+                                    f"market:timeframe-trends:v1:{symbol}",
+                                    {
+                                        "trends": trend_values,
+                                        "updated_at": utc_iso(self.clock()),
+                                        "updated_epoch": self.clock(),
+                                        "source": "binance-futures-klines",
+                                    },
+                                    ttl_seconds=TIMEFRAME_TREND_TTL,
+                                )
+                            except Exception:
+                                logger.debug("No se pudo guardar tendencia multi-temporalidad de %s", symbol, exc_info=True)
                         if item:
                             item["timeframe_trend"] = trend_values
-                            quote = quotes.get(symbol, {})
-                            last_price = _finite(quote.get("price"))
+                            last_price = _finite(quotes.get(symbol, {}).get("price"))
                             if last_price is not None:
                                 item["price"] = last_price
                         return item
@@ -366,41 +386,63 @@ class MarketIntelligenceService:
                         logger.debug("Radar: no se pudo analizar %s: %s", symbol, exc)
                         return None
 
-            items = await asyncio.gather(*(analyze(symbol) for symbol in symbols))
-            sweeps: list[dict[str, Any]] = []
-            try:
-                active = await asyncio.to_thread(self.sweep_store.load_active, now=datetime.fromtimestamp(now, tz=timezone.utc))
-                sweeps = list(active.values()) if isinstance(active, dict) else []
-            except Exception as exc:
-                logger.warning("Radar: observaciones de barrido no disponibles: %s", exc)
-            funding_rows = await self.cache.get_json(FUNDING_KEY)
-            funding = {
-                str(row.get("symbol")): _finite(row.get("lastFundingRate"))
-                for row in funding_rows if isinstance(row, dict) and row.get("symbol")
-                and _finite(row.get("lastFundingRate")) is not None
-            } if isinstance(funding_rows, list) else {}
-            snapshot = radar_engine.build_radar_snapshot(items, sweeps, funding, now=datetime.fromtimestamp(now, tz=timezone.utc))
-            regime = await self.cache.get_json(REGIME_KEY)
-            trends = {item.get("symbol"): item.get("trend_1h") for item in items if item}
-            enriched_sweeps = []
-            for sweep in snapshot.get("sweeps", []):
-                alignment = radar_engine.alignment_for(sweep["direction"], regime if isinstance(regime, dict) else None, trends.get(sweep["symbol"]))
-                enriched_sweeps.append({**sweep, "alignment": alignment,
-                                        "score": radar_engine.sweep_score(sweep, alignment["status"], now)})
-            snapshot["sweeps"] = enriched_sweeps
-            snapshot["items"] = [item for item in items if item]
-            snapshot["timeframe_trends"] = {
-                str(item.get("symbol")): item.get("timeframe_trend")
-                for item in snapshot["items"]
-                if item.get("symbol") and isinstance(item.get("timeframe_trend"), dict)
-            }
-            snapshot["status"] = "ok" if not errors else ("partial" if snapshot["scanned"] else "degraded")
-            snapshot["analysis_errors"] = errors
-            snapshot["updated_at"] = utc_iso(now)
-            snapshot["updated_epoch"] = now
-            snapshot["source"] = "binance-futures-klines-and-observed-sweeps"
-            await self.cache.set_json(RADAR_KEY, snapshot, ttl_seconds=RADAR_TTL * 2)
-            return snapshot
+            async def save_snapshot(rows: list[dict[str, Any]], *, refreshing: bool) -> dict[str, Any]:
+                current = self.clock()
+                current_dt = datetime.fromtimestamp(current, tz=timezone.utc)
+                snapshot = radar_engine.build_radar_snapshot(rows, sweeps, funding, now=current_dt)
+                trends_by_symbol = {item.get("symbol"): item.get("trend_1h") for item in rows if item}
+                enriched_sweeps = []
+                for sweep in snapshot.get("sweeps", []):
+                    alignment = radar_engine.alignment_for(
+                        sweep["direction"],
+                        regime if isinstance(regime, dict) else None,
+                        trends_by_symbol.get(sweep["symbol"]),
+                    )
+                    enriched_sweeps.append({
+                        **sweep,
+                        "alignment": alignment,
+                        "score": radar_engine.sweep_score(sweep, alignment["status"], current),
+                    })
+                snapshot["sweeps"] = enriched_sweeps
+                snapshot["items"] = rows
+                snapshot["timeframe_trends"] = {
+                    str(item.get("symbol")): item.get("timeframe_trend")
+                    for item in rows
+                    if item.get("symbol") and isinstance(item.get("timeframe_trend"), dict)
+                }
+                snapshot["status"] = (
+                    "warming" if refreshing and not snapshot["scanned"]
+                    else "partial" if refreshing or errors
+                    else "ok"
+                )
+                if not refreshing and errors and not snapshot["scanned"]:
+                    snapshot["status"] = "degraded"
+                snapshot["refreshing"] = refreshing
+                snapshot["analysis_errors"] = errors
+                snapshot["updated_at"] = utc_iso(current)
+                snapshot["updated_epoch"] = current
+                snapshot["source"] = "binance-futures-klines-and-observed-sweeps"
+                await self.cache.set_json(RADAR_KEY, snapshot, ttl_seconds=RADAR_TTL * 2)
+                return snapshot
+
+            # Publish a partial snapshot every two completed pairs. Radar visitors
+            # can see real opportunities as soon as a small batch is ready instead
+            # of waiting for every Binance candle request across the whole universe.
+            tasks = [asyncio.create_task(analyze(symbol)) for symbol in symbols]
+            items: list[dict[str, Any]] = []
+            completed = 0
+            last_snapshot: dict[str, Any] | None = None
+            for task in asyncio.as_completed(tasks):
+                item = await task
+                completed += 1
+                if item:
+                    items.append(item)
+                if completed % 2 == 0 or completed == len(tasks):
+                    last_snapshot = await save_snapshot(items, refreshing=completed < len(tasks))
+
+            if completed == 0:
+                last_snapshot = await save_snapshot(items, refreshing=False)
+            return last_snapshot or await save_snapshot(items, refreshing=False)
 
     def _schedule_timeframe_trend_refresh(self, symbol: str) -> asyncio.Task | None:
         task = self._timeframe_trend_refresh_tasks.get(symbol)
