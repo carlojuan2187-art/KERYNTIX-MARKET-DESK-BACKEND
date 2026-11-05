@@ -20,7 +20,7 @@ jobs:
       - name: Run market-loading regression tests
         env:
           PYTHONPATH: .
-        run: python -m pytest -q test/test_market_loading.py test/test_market_feed.py test/test_market_analytics_api.py --disable-warnings
+        run: python -m pytest -q test/test_market_loading.py test/test_market_feed.py test/test_market_analytics_api.py test/test_market_intelligence.py test/test_signals_api.py --disable-warnings
       - name: Compile all Python modules
         run: python -m compileall -q api domain engine worker main.py scripts test
       - name: Run unit and API contract tests
