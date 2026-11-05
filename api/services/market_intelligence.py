@@ -163,7 +163,14 @@ class MarketIntelligenceService:
                 pass
             cached = await self.cache.get_json(SIGNAL_RECORDS_KEY)
             if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
-                return cached["rows"], False, str(cached.get("updated_at") or "")
+                try:
+                    age = max(0.0, self.clock() - float(cached.get("updated_epoch", 0)))
+                except (TypeError, ValueError, OverflowError):
+                    age = 9999.0
+                if age <= 2.0:
+                    return cached["rows"], False, str(cached.get("updated_at") or "")
+                if age <= 10.0:
+                    return cached["rows"], True, str(cached.get("updated_at") or "")
         cached = await self.cache.get_json(SIGNAL_RECORDS_KEY)
         if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
             try:
@@ -260,8 +267,8 @@ class MarketIntelligenceService:
                     await self.cache.set_json(SIGNAL_RECORDS_KEY, snapshot, ttl_seconds=180)
                     self._signal_records_retry_after = 0.0
                 except Exception:
-                    self._signal_records_retry_after = self.clock() + 15.0
                     logger.warning("Actualización de señales agotó su plazo o falló", exc_info=True)
+                    raise
 
     @staticmethod
     def _warming_radar_snapshot(now: float) -> dict[str, Any]:
