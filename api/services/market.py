@@ -94,6 +94,8 @@ class MarketDataService:
         self.clock = clock
         self._quotes_refresh_lock = asyncio.Lock()
         self._funding_refresh_lock = asyncio.Lock()
+        self._quotes_refresh_task: asyncio.Task | None = None
+        self._quotes_retry_after = 0.0
 
     async def feed_status(self) -> MarketFeedHealth:
         raw = await self.cache.get_json(FEED_STATUS_KEY) or {}
@@ -130,15 +132,54 @@ class MarketDataService:
         if self._fresh_cached_quotes(cached, status):
             return await self._quotes_with_cached_funding(cached), status
 
-        # Single refresh lock within this process. Shared Redis is required in production;
-        # add a distributed refresh lease if API replicas can all reach REST concurrently.
+        # A stale snapshot is still useful. Serve it immediately and refresh the
+        # shared cache in the background instead of holding every page open while
+        # Binance REST retries time out.
+        if isinstance(cached, dict) and cached:
+            self._schedule_quotes_refresh()
+            status.status = "degraded"
+            status.source = "cache"
+            status.message = "Se muestra la última cotización guardada mientras se actualiza el feed."
+            return await self._quotes_with_cached_funding(cached), status
+
+        # Cold start: no quote snapshot exists yet, so perform one bounded fetch.
+        return await self._refresh_quotes()
+
+    def _schedule_quotes_refresh(self) -> None:
+        task = self._quotes_refresh_task
+        if task is not None and not task.done():
+            return
+        if self.clock() < self._quotes_retry_after:
+            return
+        try:
+            task = asyncio.create_task(self._refresh_quotes())
+        except RuntimeError:
+            return
+        self._quotes_refresh_task = task
+
+        def finished(done: asyncio.Task) -> None:
+            if self._quotes_refresh_task is done:
+                self._quotes_refresh_task = None
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._quotes_retry_after = self.clock() + 15.0
+                logger.debug("No se pudo refrescar la caché de cotizaciones en segundo plano: %s", error)
+
+        task.add_done_callback(finished)
+
+    async def _refresh_quotes(self) -> tuple[list[AssetQuote], MarketFeedHealth]:
         async with self._quotes_refresh_lock:
             cached = await self.cache.get_json(QUOTES_KEY)
             status = await self.feed_status()
             if self._fresh_cached_quotes(cached, status):
                 return await self._quotes_with_cached_funding(cached), status
             try:
-                tickers = await self.rest.fetch_24h_tickers()
+                tickers = await asyncio.wait_for(self.rest.fetch_24h_tickers(), timeout=5.5)
                 funding_rows = await self._get_funding_if_due()
                 funding_map = {str(row.get("symbol")): row for row in funding_rows if row.get("symbol")}
                 previous = cached if isinstance(cached, dict) else {}
@@ -166,6 +207,7 @@ class MarketDataService:
                     "message": "Feed WebSocket no disponible; cotizaciones obtenidas por REST.",
                 }
                 await self.cache.set_json(FEED_STATUS_KEY, status_obj, ttl_seconds=7200)
+                self._quotes_retry_after = 0.0
                 health = MarketFeedHealth(
                     status="degraded", source="rest", connected=False,
                     updated_at=status_obj["updated_at"], last_price_update_at=status_obj["last_price_update_at"],
@@ -173,6 +215,7 @@ class MarketDataService:
                 )
                 return self._quotes_from_map(result), health
             except Exception as exc:
+                self._quotes_retry_after = self.clock() + 15.0
                 logger.warning("REST fallback para quotes no disponible: %s", exc)
                 cached = await self.cache.get_json(QUOTES_KEY)
                 status = await self.feed_status()
@@ -181,6 +224,8 @@ class MarketDataService:
                     status.source = "cache"
                     status.message = "Se muestra la última cotización guardada; el feed y REST no responden."
                     return await self._quotes_with_cached_funding(cached), status
+                if isinstance(exc, BinanceDataError):
+                    raise
                 raise BinanceDataError("No hay cotizaciones en caché y Binance REST no está disponible") from exc
 
     @staticmethod
@@ -278,7 +323,7 @@ class MarketDataService:
             return existing
         async with self._funding_refresh_lock:
             try:
-                rows = await self.rest.fetch_funding()
+                rows = await asyncio.wait_for(self.rest.fetch_funding(), timeout=2.0)
                 await self.cache.set_json(FUNDING_KEY, rows, ttl_seconds=180)
                 await self.cache.set_json(f"{FUNDING_KEY}:meta", {"updated_epoch": now, "updated_at": utc_iso(now)}, ttl_seconds=180)
                 return rows

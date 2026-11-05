@@ -17,13 +17,18 @@ jobs:
           cache-dependency-path: requirements-dev.txt
       - name: Install development dependencies
         run: python -m pip install -r requirements-dev.txt
+      - name: Run market-loading regression tests
+        env:
+          PYTHONPATH: .
+        run: python -m pytest -q test/test_market_loading.py test/test_market_feed.py test/test_market_analytics_api.py --disable-warnings
+      - name: Compile all Python modules
+        run: python -m compileall -q api domain engine worker main.py scripts test
       - name: Run unit and API contract tests
         env:
           PYTHONPATH: .
         run: python -m pytest -q --disable-warnings --maxfail=1
-      - name: Compile all Python modules
-        run: python -m compileall -q api domain engine worker main.py scripts tests
       - name: Run release preflight
+        if: always()
         env:
           PYTHONPATH: .
         run: python -m scripts.release_preflight --json
@@ -74,4 +79,4 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Exercise real MongoDB and Redis adapters
-        run: python -m pytest -q tests/integration --disable-warnings
+        run: python -m pytest -q test/integration --disable-warnings

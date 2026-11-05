@@ -110,6 +110,8 @@ class MarketIntelligenceService:
         self._radar_refresh_task: asyncio.Task | None = None
         self._radar_retry_after = 0.0
         self._movers_locks = {window: asyncio.Lock() for window in movers_engine.WINDOWS_MINUTES}
+        self._movers_refresh_tasks: dict[int, asyncio.Task] = {}
+        self._movers_retry_after: dict[int, float] = {}
         self._timeframe_trend_locks: dict[str, asyncio.Lock] = {}
         self._timeframe_trend_semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
 
@@ -382,14 +384,54 @@ class MarketIntelligenceService:
         await self.cache.set_json(cache_key, output, ttl_seconds=LIQ_TTL)
         return output
 
+    def _schedule_movers_refresh(self, window_minutes: int) -> None:
+        task = self._movers_refresh_tasks.get(window_minutes)
+        if task is not None and not task.done():
+            return
+        if self.clock() < self._movers_retry_after.get(window_minutes, 0.0):
+            return
+        try:
+            task = asyncio.create_task(self.movers(window_minutes, force_refresh=True))
+        except RuntimeError:
+            return
+        self._movers_refresh_tasks[window_minutes] = task
+
+        def finished(done: asyncio.Task) -> None:
+            if self._movers_refresh_tasks.get(window_minutes) is done:
+                self._movers_refresh_tasks.pop(window_minutes, None)
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._movers_retry_after[window_minutes] = self.clock() + 15.0
+                logger.debug("No se pudo refrescar movers %sm: %s", window_minutes, error)
+            else:
+                self._movers_retry_after.pop(window_minutes, None)
+
+        task.add_done_callback(finished)
+
     async def movers(self, window_minutes: int = 15, *, force_refresh: bool = False) -> dict[str, Any]:
         if window_minutes not in movers_engine.WINDOWS_MINUTES:
             raise ValueError("INVALID_MOVERS_WINDOW")
         now = self.clock()
         cache_key = f"market:movers:computed:v1:{window_minutes}"
         cached = await self.cache.get_json(cache_key)
-        if not force_refresh and isinstance(cached, dict) and now - float(cached.get("updated_epoch", 0) or 0) < MOVERS_TTL:
-            return cached
+        if not force_refresh and isinstance(cached, dict):
+            try:
+                age = now - float(cached.get("updated_epoch", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                age = MOVERS_TTL + 1
+            if 0 <= age < MOVERS_TTL:
+                return cached
+            # Keep the last computed rankings visible while the next snapshot is built.
+            self._schedule_movers_refresh(window_minutes)
+            stale = dict(cached)
+            stale["stale"] = True
+            stale["stale_seconds"] = max(0.0, age)
+            return stale
         async with self._movers_locks[window_minutes]:
             cached = await self.cache.get_json(cache_key)
             if not force_refresh and isinstance(cached, dict) and now - float(cached.get("updated_epoch", 0) or 0) < MOVERS_TTL:
@@ -402,9 +444,11 @@ class MarketIntelligenceService:
             sorted_quotes = sorted(quotes.items(), key=lambda pair: _quote_volume(pair[1]), reverse=True)
             candidates = [(s, q) for s, q in sorted_quotes if s.endswith("USDT") and _quote_volume(q) >= movers_engine.MIN_QUOTE_VOLUME][:MOVERS_SYMBOL_LIMIT]
 
+            history_semaphore = asyncio.Semaphore(32)
             async def history_for(symbol: str, quote: dict[str, Any]):
                 try:
-                    history = await self.cache.get_timed_list_json(f"market:price-history:v1:{symbol}", limit=300, retention_seconds=3900)
+                    async with history_semaphore:
+                        history = await self.cache.get_timed_list_json(f"market:price-history:v1:{symbol}", limit=300, retention_seconds=3900)
                     row = movers_engine.window_changes(history, now=now, minutes=window_minutes, latest_quote=quote)
                     return symbol, row
                 except Exception:
@@ -424,12 +468,18 @@ class MarketIntelligenceService:
                     if symbol not in seen:
                         seen.add(symbol)
                         shortlist.append(row)
+                        # Exact candle confirmation is supplementary; cap it to one
+                        # bounded batch and keep estimated history for the rest.
+                        if len(shortlist) >= 4:
+                            break
+                if len(shortlist) >= 4:
+                    break
             semaphore = asyncio.Semaphore(4)
             async def enrich(row: dict[str, Any]):
                 symbol = row["symbol"]
                 try:
                     async with semaphore:
-                        raw = await self.rest.fetch_klines(symbol, "5m", 120)
+                        raw = await asyncio.wait_for(self.rest.fetch_klines(symbol, "5m", 120), timeout=5.0)
                     candles = flow_engine.parse_candles(raw)
                     stats = flow_engine.window_stats(candles, window_minutes, now)
                 except Exception as exc:
@@ -458,7 +508,7 @@ class MarketIntelligenceService:
                 "message": None if ready else "Acumulando historial del feed; todavía no hay cobertura suficiente para esta ventana.",
                 "source": "binance-futures-live-price-history", "updated_at": utc_iso(now), "updated_epoch": now,
             }
-            await self.cache.set_json(cache_key, output, ttl_seconds=MOVERS_TTL * 3)
+            await self.cache.set_json(cache_key, output, ttl_seconds=180)
             return output
 
     async def overview(self, *, signal_limit: int = 300) -> dict[str, Any]:
