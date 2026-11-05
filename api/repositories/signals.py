@@ -171,6 +171,7 @@ class MongoSignalRepository:
             signal_collection.create_index([("symbol", 1), ("created_at", -1)])
             signal_collection.create_index([("status", 1), ("created_at", -1)])
             signal_collection.create_index([("lifecycle.status", 1), ("created_at", -1)])
+            signal_collection.create_index([("outcome.state", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
         except Exception:
