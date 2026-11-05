@@ -91,13 +91,21 @@ def personal_result_rows(
     if not intervals:
         return []
 
-    delivered_ids = set(signal_ids)
+    delivered_at_by_id = {
+        str(row.get("signal_id") or ""): _parse_datetime(row.get("delivered_at"))
+        for row in deliveries
+        if str(row.get("signal_id") or "")
+    }
     eligible: list[Mapping[str, Any]] = []
     for row in results:
         signal_id = str(row.get("signal_id") or row.get("id") or "")
-        if signal_id not in delivered_ids:
+        delivered_at = delivered_at_by_id.get(signal_id)
+        closed_at = _parse_datetime(row.get("closed_at"))
+        # A closed signal opened from a symbol lookup after the fact was not an
+        # operation delivered to the user while it was actionable.
+        if delivered_at is None or closed_at is None or closed_at < delivered_at:
             continue
-        if _closed_during_entitlement(row.get("closed_at"), intervals):
+        if _closed_during_entitlement(closed_at, intervals):
             eligible.append(row)
     eligible.sort(key=lambda row: _parse_datetime(row.get("closed_at")) or datetime.min.replace(tzinfo=timezone.utc))
     return eligible
