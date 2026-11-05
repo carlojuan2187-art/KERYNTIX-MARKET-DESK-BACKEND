@@ -46,7 +46,7 @@ async def get_radar(
 ) -> dict[str, Any]:
     try:
         result = await request.app.state.market_intelligence_service.radar(force_refresh=refresh)
-        records, setups_refreshing, signal_updated_at = await request.app.state.market_intelligence_service.signal_records(wait_seconds=0.0)
+        records, setups_refreshing, signal_updated_at = await request.app.state.market_intelligence_service.signal_records(wait_seconds=0.5)
     except AnalyticsIntelligenceUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "RADAR_UNAVAILABLE", "message": "El radar está recopilando cotizaciones y velas del mercado."}) from exc
     except RepositoryUnavailable as exc:
@@ -132,6 +132,7 @@ async def get_radar(
                 # Trend enrichment is optional; it must not make the entire radar unavailable.
                 pass
     output["timeframe_trends"] = trends
+    output["timeframe_trends_refreshing"] = request.app.state.market_intelligence_service.timeframe_trends_refreshing(trend_symbols)
 
     response.headers["X-FTrade-Radar-Source"] = str(result.get("source", ""))
     response.headers["X-FTrade-Radar-Updated-At"] = str(result.get("updated_at", ""))
