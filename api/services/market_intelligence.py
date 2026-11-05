@@ -141,7 +141,10 @@ class MarketIntelligenceService:
             if age <= 2.0:
                 return cached["rows"], False, str(cached.get("updated_at") or "")
             self._schedule_signal_records_refresh()
-            return cached["rows"], True, str(cached.get("updated_at") or "")
+            if age <= 10.0:
+                # A very recent last-good feed is safe to preserve during a short
+                # refresh. Older pending signals must not be presented as current.
+                return cached["rows"], True, str(cached.get("updated_at") or "")
 
         task = self._schedule_signal_records_refresh()
         if wait_seconds > 0 and task is not None:
@@ -156,7 +159,12 @@ class MarketIntelligenceService:
                 return cached["rows"], False, str(cached.get("updated_at") or "")
         cached = await self.cache.get_json(SIGNAL_RECORDS_KEY)
         if isinstance(cached, dict) and isinstance(cached.get("rows"), list):
-            return cached["rows"], True, str(cached.get("updated_at") or "")
+            try:
+                age = max(0.0, self.clock() - float(cached.get("updated_epoch", 0)))
+            except (TypeError, ValueError, OverflowError):
+                age = 9999.0
+            if age <= 10.0:
+                return cached["rows"], True, str(cached.get("updated_at") or "")
         return [], True, None
 
     def _schedule_signal_records_refresh(self) -> asyncio.Task | None:
@@ -427,7 +435,9 @@ class MarketIntelligenceService:
         async with self._timeframe_trend_locks.setdefault(symbol, asyncio.Lock()):
             cached = await self.cache.get_json(cache_key)
             if isinstance(cached, dict) and isinstance(cached.get("trends"), dict):
-                return
+                current = cached["trends"]
+                if all(current.get(label) is not None for label in ("15M", "1H", "4H")):
+                    return
             try:
                 async with self._timeframe_trend_semaphore:
                     fetched = await asyncio.wait_for(
@@ -483,10 +493,13 @@ class MarketIntelligenceService:
             except Exception:
                 cached = None
             if isinstance(cached, dict) and isinstance(cached.get("trends"), dict):
-                return symbol, {
+                current = {
                     label: cached["trends"].get(label)
                     for label in ("15M", "1H", "4H")
                 }
+                if any(value is None for value in current.values()):
+                    self._schedule_timeframe_trend_refresh(symbol)
+                return symbol, current
             self._schedule_timeframe_trend_refresh(symbol)
             return symbol, {"15M": None, "1H": None, "4H": None}
 
