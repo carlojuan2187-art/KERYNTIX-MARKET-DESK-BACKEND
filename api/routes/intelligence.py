@@ -124,7 +124,11 @@ async def get_radar(
     # only a few active setups missing from the cached scan to bound request time.
     trends = dict(existing_trends)
     if not result.get("refreshing"):
-        missing = [symbol for symbol in trend_symbols if symbol not in trends][:4]
+        missing = [
+            symbol for symbol in trend_symbols
+            if not isinstance(trends.get(symbol), dict)
+            or any(trends.get(symbol, {}).get(label) is None for label in ("15M", "1H", "4H"))
+        ][:4]
         if missing:
             try:
                 trends.update(await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(missing))
