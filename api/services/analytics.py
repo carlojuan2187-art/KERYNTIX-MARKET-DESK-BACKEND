@@ -24,6 +24,7 @@ logger = logging.getLogger("ftrade.analytics")
 
 DERIVATIVES_TTL = 60
 FLOW_TTL = 20
+FLOW_CACHE_TTL = 180
 ORDERBOOK_TTL = 5
 REGIME_TTL = 90
 CALENDAR_TTL = 300
@@ -110,6 +111,8 @@ class MarketAnalyticsService:
         self.clock = clock
         self._derivative_locks: dict[str, asyncio.Lock] = {}
         self._flow_locks: dict[str, asyncio.Lock] = {}
+        self._flow_refresh_tasks: dict[str, asyncio.Task] = {}
+        self._flow_retry_after: dict[str, float] = {}
         self._regime_lock = asyncio.Lock()
         self._calendar_locks: dict[int, asyncio.Lock] = {}
 
@@ -418,13 +421,70 @@ class MarketAnalyticsService:
         key = FLOW_KEY_PREFIX + symbol
         cached = await self.cache.get_json(key)
         if isinstance(cached, dict) and cached.get("symbol") == symbol:
-            return self._flow_for_timezone(cached, tz_name)
+            try:
+                age = self.clock() - float(cached.get("updated_epoch", self.clock()))
+            except (TypeError, ValueError, OverflowError):
+                age = 0.0
+            if 0 <= age < FLOW_TTL:
+                return self._flow_for_timezone(cached, tz_name)
+            self._schedule_flow_refresh(symbol)
+            stale = dict(cached)
+            stale["stale"] = True
+            stale["stale_seconds"] = max(0.0, age)
+            return self._flow_for_timezone(stale, tz_name)
 
+        # On a cold cache, do one short bounded fetch; future requests use the
+        # longer-lived last snapshot while a background refresh runs.
+        result = await self._build_flow(symbol)
+        return self._flow_for_timezone(result, tz_name)
+
+    def _schedule_flow_refresh(self, symbol: str) -> None:
+        task = self._flow_refresh_tasks.get(symbol)
+        if task is not None and not task.done():
+            return
+        if self.clock() < self._flow_retry_after.get(symbol, 0.0):
+            return
+        try:
+            task = asyncio.create_task(self._build_flow(symbol))
+        except RuntimeError:
+            return
+        self._flow_refresh_tasks[symbol] = task
+
+        def finished(done: asyncio.Task) -> None:
+            if self._flow_refresh_tasks.get(symbol) is done:
+                self._flow_refresh_tasks.pop(symbol, None)
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._flow_retry_after[symbol] = self.clock() + 15.0
+                logger.debug("No se pudo refrescar el flujo de %s: %s", symbol, error)
+            else:
+                self._flow_retry_after.pop(symbol, None)
+
+        task.add_done_callback(finished)
+
+    async def _build_flow(self, symbol: str) -> dict[str, Any]:
+        key = FLOW_KEY_PREFIX + symbol
         async with self._lock_for(self._flow_locks, symbol):
             cached = await self.cache.get_json(key)
             if isinstance(cached, dict) and cached.get("symbol") == symbol:
-                return self._flow_for_timezone(cached, tz_name)
-            rows = await self.rest.fetch_klines(symbol, "5m", flow_engine.CANDLE_LIMIT)
+                try:
+                    age = self.clock() - float(cached.get("updated_epoch", self.clock()))
+                except (TypeError, ValueError, OverflowError):
+                    age = 0.0
+                if 0 <= age < FLOW_TTL:
+                    return cached
+            try:
+                rows = await asyncio.wait_for(
+                    self.rest.fetch_klines(symbol, "5m", flow_engine.CANDLE_LIMIT),
+                    timeout=6.0,
+                )
+            except asyncio.TimeoutError as exc:
+                raise AnalyticsUnavailable("FLOW_TIMEOUT") from exc
             candles = flow_engine.parse_candles(rows)
             if len(candles) < 49:
                 raise AnalyticsUnavailable("FLOW_COLLECTING")
@@ -453,6 +513,7 @@ class MarketAnalyticsService:
                 "volume_ratio": next((row.get("volume_ratio") for row in windows if row["label"] == "15m"), None),
                 "reading": " ".join(flow_engine.interpret_flow(computed)),
                 "updated_at": utc_iso(now_epoch),
+                "updated_epoch": now_epoch,
                 "source": "binance_futures_klines_5m",
                 "status": "ok" if coverage_complete else "collecting",
                 "quality": {
@@ -470,8 +531,8 @@ class MarketAnalyticsService:
                 "price_cvd": flow_engine.price_cvd_context(candles, now=now_epoch),
                 "raw": computed,
             }
-            await self.cache.set_json(key, output, ttl_seconds=FLOW_TTL)
-            return self._flow_for_timezone(output, tz_name)
+            await self.cache.set_json(key, output, ttl_seconds=FLOW_CACHE_TTL)
+            return output
 
     @staticmethod
     def _flow_for_timezone(data: dict[str, Any], tz_name: str) -> dict[str, Any]:
@@ -506,7 +567,10 @@ class MarketAnalyticsService:
             cached = await self.cache.get_json(key)
             if isinstance(cached, dict) and cached.get("symbol") == symbol:
                 return cached
-            raw = await self._safe_endpoint("/fapi/v1/depth", {"symbol": symbol, "limit": limit})
+            raw = await asyncio.wait_for(
+                self._safe_endpoint("/fapi/v1/depth", {"symbol": symbol, "limit": limit}),
+                timeout=4.0,
+            )
             if not isinstance(raw, dict):
                 raise AnalyticsUnavailable("ORDER_BOOK_UNAVAILABLE")
 
