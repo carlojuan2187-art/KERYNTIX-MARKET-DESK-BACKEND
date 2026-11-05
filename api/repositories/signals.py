@@ -72,7 +72,10 @@ class InMemorySignalRepository:
             outcome = doc.get("outcome") if isinstance(doc.get("outcome"), Mapping) else {}
             status = str(doc.get("status") or lifecycle.get("status") or "").upper()
             state = str(outcome.get("state") or "").upper()
-            if status in {"PENDING", "TOUCHED", "CANCELLED"} or state in {"OPEN", "TP1_HIT"}:
+            cancelled_at = doc.get("cancelled_at") or lifecycle.get("cancelled_at")
+            cancelled_epoch = _parse_datetime(cancelled_at)
+            recent_cancel = bool(cancelled_epoch and cancelled_epoch >= datetime.now(timezone.utc) - timedelta(minutes=30))
+            if status in {"PENDING", "TOUCHED"} or recent_cancel or state in {"OPEN", "TP1_HIT"}:
                 active.append(doc)
                 if len(active) >= max(1, min(int(limit), 500)):
                     break
@@ -165,7 +168,9 @@ class MongoSignalRepository:
             signal_collection.create_index([("created_at", -1)])
             signal_collection.create_index([("symbol", 1), ("created_at", -1)])
             signal_collection.create_index([("status", 1), ("created_at", -1)])
+            signal_collection.create_index([("status", 1), ("cancelled_at", -1), ("created_at", -1)])
             signal_collection.create_index([("lifecycle.status", 1), ("created_at", -1)])
+            signal_collection.create_index([("lifecycle.status", 1), ("lifecycle.cancelled_at", -1), ("created_at", -1)])
             signal_collection.create_index([("outcome.state", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
@@ -199,10 +204,13 @@ class MongoSignalRepository:
 
     def list_active_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
         """Use indexed status predicates instead of scanning recent closed history."""
+        cancelled_cutoff = datetime.now(timezone.utc) - timedelta(minutes=30)
         query = {
             "$or": [
-                {"status": {"$in": ["PENDING", "TOUCHED", "CANCELLED"]}},
-                {"lifecycle.status": {"$in": ["PENDING", "TOUCHED", "CANCELLED"]}},
+                {"status": {"$in": ["PENDING", "TOUCHED"]}},
+                {"lifecycle.status": {"$in": ["PENDING", "TOUCHED"]}},
+                {"status": "CANCELLED", "cancelled_at": {"$gte": cancelled_cutoff}},
+                {"lifecycle.status": "CANCELLED", "lifecycle.cancelled_at": {"$gte": cancelled_cutoff}},
                 {"outcome.state": {"$in": ["OPEN", "TP1_HIT"]}},
             ]
         }
