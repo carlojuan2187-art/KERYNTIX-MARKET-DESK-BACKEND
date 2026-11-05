@@ -324,8 +324,12 @@ class WatchlistService:
             }
         quotes, status, updated_at = await self._quote_map()
         try:
-            signals = await asyncio.to_thread(self.signals.list_signals, limit=300)
+            active_reader = getattr(self.signals, "list_active_signals", None)
+            reader = active_reader if callable(active_reader) else self.signals.list_signals
+            signals = await asyncio.wait_for(asyncio.to_thread(reader, limit=150), timeout=3.0)
         except Exception:
+            # Watchlist prices and cached technical reads remain available even if
+            # MongoDB cannot provide active-signal annotations on this request.
             signals = []
         active: dict[str, dict[str, Any]] = {}
         for signal in signals:
