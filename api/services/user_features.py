@@ -237,6 +237,15 @@ class WatchlistService:
     async def list(self, user_id: str) -> dict[str, Any]:
         user = self._user(user_id)
         symbols = user_symbols(user)
+        if not symbols:
+            # An empty watchlist has no market analysis to perform. Avoid the
+            # shared quotes fallback and signal-history query entirely; this also
+            # keeps a new user's 0/10 view independent from Binance/Mongo latency.
+            return {
+                "items": [], "total": 0, "max_items": MAX_PAIRS,
+                "status": "empty", "source": "user-watchlist",
+                "updated_at": None, "analysis_status": "empty",
+            }
         quotes, status, updated_at = await self._quote_map()
         try:
             signals = await asyncio.to_thread(self.signals.list_signals, limit=300)

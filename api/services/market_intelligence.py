@@ -34,6 +34,7 @@ LIQ_STATUS_KEY = "market:liquidations:status:v1"
 MOVERS_COVERAGE_KEY = "market:movers:coverage:v1"
 REGIME_KEY = "market:regime:v1"
 RADAR_TTL = max(20, int(os.getenv("RADAR_CACHE_SECONDS", "60")))
+RADAR_REFRESH_RETRY_SECONDS = max(10, int(os.getenv("RADAR_REFRESH_RETRY_SECONDS", "30")))
 LIQ_TTL = 5
 MOVERS_TTL = 15
 RADAR_SYMBOL_LIMIT = max(8, min(30, int(os.getenv("RADAR_SYMBOL_LIMIT", "18"))))
@@ -106,17 +107,77 @@ class MarketIntelligenceService:
         self.sweep_store = sweep_store
         self.clock = clock
         self._radar_lock = asyncio.Lock()
+        self._radar_refresh_task: asyncio.Task | None = None
+        self._radar_retry_after = 0.0
         self._movers_locks = {window: asyncio.Lock() for window in movers_engine.WINDOWS_MINUTES}
         self._timeframe_trend_locks: dict[str, asyncio.Lock] = {}
         self._timeframe_trend_semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
 
+    @staticmethod
+    def _warming_radar_snapshot(now: float) -> dict[str, Any]:
+        return {
+            "ts": now, "scanned": 0, "prices": {}, "funding": {},
+            "watch": [], "watch_total": 0, "sweeps": [], "movers": [],
+            "items": [], "timeframe_trends": {}, "status": "warming",
+            "analysis_errors": 0, "updated_at": None, "updated_epoch": 0,
+            "source": "background-radar-refresh", "refreshing": True,
+        }
+
+    def _schedule_radar_refresh(self) -> None:
+        task = self._radar_refresh_task
+        if task is not None and not task.done():
+            return
+        if self.clock() < self._radar_retry_after:
+            return
+        try:
+            task = asyncio.create_task(self._build_radar_snapshot(force_refresh=True))
+        except RuntimeError:
+            logger.warning("No se pudo programar la actualización del radar: no hay event loop activo")
+            return
+        self._radar_refresh_task = task
+
+        def _report_failure(done: asyncio.Task) -> None:
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._radar_retry_after = self.clock() + RADAR_REFRESH_RETRY_SECONDS
+                logger.warning("La actualización en segundo plano del radar falló: %s", error)
+            else:
+                self._radar_retry_after = 0.0
+
+        task.add_done_callback(_report_failure)
+
     async def radar(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        """Return a cached radar immediately; build cold/stale snapshots in background.
+
+        The market scan can request dozens of Binance candle series. It must not be
+        tied to a user's 9-second page-load deadline. A stale snapshot is preferable
+        to a blank/error panel while one shared refresh is in progress.
+        """
         now = self.clock()
+        if force_refresh:
+            return await self._build_radar_snapshot(force_refresh=True)
+
         cached = await self.cache.get_json(RADAR_KEY)
-        if not force_refresh and isinstance(cached, dict):
+        if isinstance(cached, dict):
             age = now - float(cached.get("updated_epoch", 0) or 0)
             if 0 <= age < RADAR_TTL:
                 return cached
+            self._schedule_radar_refresh()
+            stale = dict(cached)
+            stale["refreshing"] = True
+            stale["snapshot_age_seconds"] = max(0.0, age)
+            return stale
+
+        self._schedule_radar_refresh()
+        return self._warming_radar_snapshot(now)
+
+    async def _build_radar_snapshot(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        now = self.clock()
         async with self._radar_lock:
             cached = await self.cache.get_json(RADAR_KEY)
             if not force_refresh and isinstance(cached, dict):
