@@ -74,4 +74,4 @@ jobs:
       - name: Install development dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Exercise real MongoDB and Redis adapters
-        run: python -m pytest -q tests/integration --disable-warnings
+        run: python -m pytest -q test/integration --disable-warnings
