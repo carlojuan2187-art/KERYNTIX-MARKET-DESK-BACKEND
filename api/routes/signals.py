@@ -1,6 +1,8 @@
 """Read-only HTTP endpoints for KERYNTIX MARKET DESK signals."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from api.repositories.signals import RepositoryUnavailable
@@ -8,7 +10,8 @@ from api.schemas import SignalApiResponse
 from domain.signals import CanonicalSignalResult, OutcomeState
 from api.security import Principal, require_analytical_access
 from api.services.signals import SignalDataIntegrityError, SignalService
-from api.services.stats_baseline import get_reset_at, rows_since
+from api.services.stats_baseline import get_reset_at
+from api.services.user_performance import personal_result_rows
 
 router = APIRouter(prefix="/signals", tags=["signals"])
 
@@ -32,6 +35,13 @@ async def list_signals(
         # must not make every visitor wait 20 seconds for the same 10 live cards.
         records, refreshing, updated_at = await request.app.state.market_intelligence_service.signal_records(wait_seconds=1.5)
         rows = _service(request).list_visible(limit=limit, raw_docs=records)
+        # Persist the delivery before returning the feed. A unique user/signal key
+        # prevents repeated polling from inflating personal operation counts.
+        request.app.state.signal_repository.record_user_deliveries(
+            _principal.user_id,
+            [str(row.id) for row in rows],
+            delivered_at=datetime.now(timezone.utc),
+        )
         response.headers["X-Keryntix-Signals-Status"] = "refreshing" if refreshing else "ready"
         if updated_at:
             response.headers["X-Keryntix-Signals-Updated-At"] = updated_at
@@ -51,9 +61,14 @@ def list_signal_results(
 ) -> list[CanonicalSignalResult]:
     """Return immutable closed-trade snapshots (TP1/TP2/SL), newest first."""
     try:
-        rows = request.app.state.signal_repository.list_results(limit=limit)
-        # Admin statistics reset: count only trades closed after the cut-off.
-        rows = rows_since(rows, get_reset_at(request.app.state.business_repository))
+        rows = personal_result_rows(
+            request.app.state.signal_repository,
+            user_id=_principal.user_id,
+            claims=_principal.claims,
+            reset_at=get_reset_at(request.app.state.business_repository),
+            is_admin=_principal.is_admin,
+        )
+        rows = list(reversed(rows[-limit:]))
     except RepositoryUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "DATA_UNAVAILABLE", "message": "Los resultados no están disponibles temporalmente."}) from exc
     output: list[CanonicalSignalResult] = []
@@ -86,4 +101,9 @@ def get_signal_by_symbol(
         raise HTTPException(status_code=503, detail={"code": "SIGNAL_DATA_INVALID", "message": "La señal almacenada no cumple el contrato de datos."}) from exc
     if signal is None:
         raise HTTPException(status_code=404, detail={"code": "SIGNAL_NOT_FOUND", "message": f"No se encontró una señal para {normalized}."})
+    request.app.state.signal_repository.record_user_deliveries(
+        _principal.user_id,
+        [str(signal.id)],
+        delivered_at=datetime.now(timezone.utc),
+    )
     return signal
