@@ -195,18 +195,26 @@ def test_radar_includes_premium_visibility_setups_during_full_five_day_trial():
     assert setups[0]["symbol"] == "BTCUSDT"
 
 
-def test_timeframe_trends_for_unscanned_symbol_are_real_and_cached():
+def test_timeframe_trends_for_unscanned_symbol_are_loaded_in_background_and_cached():
     cache = InMemoryJsonCache()
     rest = FakeRest()
     service = MarketIntelligenceService(cache, rest, InMemorySignalRepository([]), InMemorySweepStore())
 
-    first = run(service.timeframe_trends_for_symbols(["ETHUSDT"]))
-    assert set(first["ETHUSDT"]) == {"15M", "1H", "4H"}
-    assert all(value in {"up", "down", "range", "transition", "volatile"} for value in first["ETHUSDT"].values())
-    count = len(rest.calls)
-    second = run(service.timeframe_trends_for_symbols(["ETHUSDT"]))
-    assert second == first
-    assert len(rest.calls) == count
+    async def scenario():
+        first = await service.timeframe_trends_for_symbols(["ETHUSDT"])
+        assert first["ETHUSDT"] == {"15M": None, "1H": None, "4H": None}
+        task = service._timeframe_trend_refresh_tasks.get("ETHUSDT")
+        assert task is not None
+        await task
+        second = await service.timeframe_trends_for_symbols(["ETHUSDT"])
+        assert set(second["ETHUSDT"]) == {"15M", "1H", "4H"}
+        assert all(value in {"up", "down", "range", "transition", "volatile"} for value in second["ETHUSDT"].values())
+        count = len(rest.calls)
+        third = await service.timeframe_trends_for_symbols(["ETHUSDT"])
+        assert third == second
+        assert len(rest.calls) == count
+
+    run(scenario())
 
 
 def test_overview_uses_shared_snapshots_and_counts_signal_statuses():
