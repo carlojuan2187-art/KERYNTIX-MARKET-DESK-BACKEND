@@ -10,7 +10,7 @@ import logging
 import math
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 import pandas as pd
@@ -147,7 +147,7 @@ class MarketIntelligenceService:
         if wait_seconds > 0 and task is not None:
             try:
                 await asyncio.wait_for(asyncio.shield(task), timeout=min(2.0, max(0.0, wait_seconds)))
-            except (asyncio.TimeoutError, Exception):
+            except Exception:
                 # The last-known/empty state remains available; do not make the
                 # HTTP request inherit Mongo's full server-selection timeout.
                 pass
@@ -192,8 +192,7 @@ class MarketIntelligenceService:
     async def _refresh_signal_records(self) -> None:
         async with self._signal_records_lock:
             try:
-                cutoff = datetime.fromtimestamp(self.clock(), tz=timezone.utc).replace(microsecond=0)
-                cutoff = cutoff - __import__("datetime").timedelta(minutes=30)
+                cutoff = datetime.fromtimestamp(self.clock(), tz=timezone.utc) - timedelta(minutes=30)
                 reader = getattr(self.repository, "list_live_candidates", None)
                 if callable(reader):
                     rows = await asyncio.wait_for(
@@ -499,6 +498,12 @@ class MarketIntelligenceService:
             else:
                 result[symbol] = row[1]
         return result
+
+    def timeframe_trends_refreshing(self, symbols: list[str] | tuple[str, ...] | set[str]) -> bool:
+        return any(
+            (task := self._timeframe_trend_refresh_tasks.get(str(symbol).upper())) is not None and not task.done()
+            for symbol in symbols
+        )
 
     async def liquidations(self, window_minutes: int = 15) -> dict[str, Any]:
         if window_minutes not in (5, 15, 60):
