@@ -81,6 +81,8 @@ def _http(code: str, status: int, message: str) -> HTTPException:
 
 class WatchlistService:
     ANALYSIS_TTL_SECONDS = 60
+    ANALYSIS_CACHE_TTL_SECONDS = 900
+    ANALYSIS_FETCH_TIMEOUT_SECONDS = 7.0
     SWEEP_TTL_SECONDS = 10
     SWEEP_WINDOW_MINUTES = 20
     SWEEP_PROFILE = "plus"
@@ -96,6 +98,8 @@ class WatchlistService:
         self.clock = clock
         self._analysis_semaphore = asyncio.Semaphore(4)
         self._symbol_locks: dict[str, asyncio.Lock] = {}
+        self._analysis_refresh_tasks: dict[str, asyncio.Task] = {}
+        self._analysis_retry_after: dict[str, float] = {}
 
     @staticmethod
     def _frame_from_klines(rows: list[list[Any]]) -> pd.DataFrame:
@@ -112,38 +116,110 @@ class WatchlistService:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         return frame[["open", "high", "low", "close", "volume", "close_time"]].dropna().reset_index(drop=True)
 
+    @staticmethod
+    def _analysis_values(cached: Mapping[str, Any]) -> dict[str, Any]:
+        # Internal cache metadata must not leak into the public watchlist contract.
+        return {timeframe: cached.get(timeframe) for timeframe in TIMEFRAMES}
+
+    def _schedule_symbol_analysis_refresh(self, symbol: str) -> None:
+        existing = self._analysis_refresh_tasks.get(symbol)
+        if existing is not None and not existing.done():
+            return
+        if self.clock() < self._analysis_retry_after.get(symbol, 0.0):
+            return
+        try:
+            task = asyncio.create_task(self._refresh_symbol_analysis(symbol))
+        except RuntimeError:
+            return
+        self._analysis_refresh_tasks[symbol] = task
+
+        def finished(done: asyncio.Task) -> None:
+            if self._analysis_refresh_tasks.get(symbol) is done:
+                self._analysis_refresh_tasks.pop(symbol, None)
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._analysis_retry_after[symbol] = self.clock() + 15.0
+                logger.debug("Watchlist: actualización técnica fallida para %s: %s", symbol, error)
+
+        task.add_done_callback(finished)
+
     async def _symbol_analysis(self, symbol: str) -> dict[str, Any]:
+        """Serve cached analysis immediately; never make a page wait for candle history."""
         cache_key = f"market:watchlist-analysis:v1:{symbol}"
         cached = await self.cache.get_json(cache_key)
         if isinstance(cached, dict) and any(cached.get(tf) for tf in TIMEFRAMES):
-            return cached
+            updated_epoch = cached.get("_updated_epoch")
+            try:
+                age = self.clock() - float(updated_epoch) if updated_epoch is not None else 0.0
+            except (TypeError, ValueError, OverflowError):
+                age = 0.0
+            if 0 <= age <= self.ANALYSIS_TTL_SECONDS:
+                return self._analysis_values(cached)
+            self._schedule_symbol_analysis_refresh(symbol)
+            return self._analysis_values(cached)
+
+        self._schedule_symbol_analysis_refresh(symbol)
+        return {timeframe: None for timeframe in TIMEFRAMES}
+
+    async def _refresh_symbol_analysis(self, symbol: str) -> None:
+        cache_key = f"market:watchlist-analysis:v1:{symbol}"
         lock = self._symbol_locks.setdefault(symbol, asyncio.Lock())
         async with lock:
             cached = await self.cache.get_json(cache_key)
             if isinstance(cached, dict) and any(cached.get(tf) for tf in TIMEFRAMES):
-                return cached
+                try:
+                    age = self.clock() - float(cached.get("_updated_epoch", self.clock()))
+                except (TypeError, ValueError, OverflowError):
+                    age = 0.0
+                if 0 <= age <= self.ANALYSIS_TTL_SECONDS:
+                    return
             rest = getattr(self.market, "rest", None)
             if rest is None or not hasattr(rest, "fetch_klines"):
-                return {tf: None for tf in TIMEFRAMES}
-            async with self._analysis_semaphore:
-                fetched = await asyncio.gather(
-                    *(rest.fetch_klines(symbol, tf, 240) for tf in TIMEFRAMES),
-                    return_exceptions=True,
-                )
-            frames = {tf: fetched[i] if not isinstance(fetched[i], Exception) else []
-                      for i, tf in enumerate(TIMEFRAMES)}
+                self._analysis_retry_after[symbol] = self.clock() + 30.0
+                return
+            try:
+                async with self._analysis_semaphore:
+                    fetched = await asyncio.wait_for(
+                        asyncio.gather(
+                            *(rest.fetch_klines(symbol, timeframe, 240) for timeframe in TIMEFRAMES),
+                            return_exceptions=True,
+                        ),
+                        timeout=self.ANALYSIS_FETCH_TIMEOUT_SECONDS,
+                    )
+            except asyncio.TimeoutError:
+                self._analysis_retry_after[symbol] = self.clock() + 15.0
+                logger.debug("Watchlist: timeout consultando velas para %s", symbol)
+                return
+
+            frames = {
+                timeframe: fetched[index] if not isinstance(fetched[index], Exception) else []
+                for index, timeframe in enumerate(TIMEFRAMES)
+            }
+
             def analyze() -> dict[str, Any]:
                 result: dict[str, Any] = {}
-                for tf, rows in frames.items():
+                for timeframe, rows in frames.items():
                     try:
-                        result[tf] = analyze_timeframe(self._frame_from_klines(rows))
+                        result[timeframe] = analyze_timeframe(self._frame_from_klines(rows))
                     except Exception:
-                        result[tf] = None
+                        result[timeframe] = None
                 return result
+
             analyses = await asyncio.to_thread(analyze)
             if any(analyses.values()):
-                await self.cache.set_json(cache_key, analyses, ttl_seconds=self.ANALYSIS_TTL_SECONDS)
-            return analyses
+                await self.cache.set_json(
+                    cache_key,
+                    {**analyses, "_updated_epoch": self.clock()},
+                    ttl_seconds=self.ANALYSIS_CACHE_TTL_SECONDS,
+                )
+                self._analysis_retry_after.pop(symbol, None)
+            else:
+                self._analysis_retry_after[symbol] = self.clock() + 15.0
 
     @staticmethod
     def _parse_sweep_epoch(value: Any) -> float | None:
