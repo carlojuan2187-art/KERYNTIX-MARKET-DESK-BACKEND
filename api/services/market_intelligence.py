@@ -117,6 +117,7 @@ class MarketIntelligenceService:
         self._movers_retry_after: dict[int, float] = {}
         self._timeframe_trend_locks: dict[str, asyncio.Lock] = {}
         self._timeframe_trend_tasks: dict[str, asyncio.Task] = {}
+        self._timeframe_trend_retry_after: dict[str, float] = {}
         self._timeframe_trend_semaphore = asyncio.Semaphore(RADAR_CONCURRENCY)
 
     @staticmethod
@@ -306,66 +307,118 @@ class MarketIntelligenceService:
             await self.cache.set_json(RADAR_KEY, snapshot, ttl_seconds=RADAR_TTL * 2)
             return snapshot
 
-    async def timeframe_trends_for_symbols(self, symbols: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, str | None]]:
-        """Return cached per-symbol 15M/1H/4H trend analyses, fetching only missing symbols.
+    def _schedule_timeframe_trend_refresh(self, symbol: str) -> None:
+        task = self._timeframe_trend_tasks.get(symbol)
+        if task is not None and not task.done():
+            return
+        if self.clock() < self._timeframe_trend_retry_after.get(symbol, 0.0):
+            return
+        try:
+            task = asyncio.create_task(self._refresh_timeframe_trend(symbol))
+        except RuntimeError:
+            return
+        self._timeframe_trend_tasks[symbol] = task
 
-        Results are computed from closed Binance Futures candles and cached briefly in
-        shared Redis so radar page views do not trigger a full re-analysis each time.
-        """
+        def finished(done: asyncio.Task) -> None:
+            if self._timeframe_trend_tasks.get(symbol) is done:
+                self._timeframe_trend_tasks.pop(symbol, None)
+            if done.cancelled():
+                return
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                return
+            if error is not None:
+                self._timeframe_trend_retry_after[symbol] = self.clock() + 20.0
+                logger.debug("Actualización de tendencia fallida para %s: %s", symbol, error)
+            else:
+                self._timeframe_trend_retry_after.pop(symbol, None)
+
+        task.add_done_callback(finished)
+
+    async def _refresh_timeframe_trend(self, symbol: str) -> dict[str, str | None]:
+        cache_key = f"market:timeframe-trends:v1:{symbol}"
+        lock = self._timeframe_trend_locks.setdefault(symbol, asyncio.Lock())
+        async with lock:
+            previous = await self.cache.get_json(cache_key)
+            previous = previous if isinstance(previous, dict) else {}
+            previous_trends = previous.get("trends") if isinstance(previous.get("trends"), dict) else {}
+            now = self.clock()
+            try:
+                age = now - float(previous.get("updated_epoch", 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                age = TIMEFRAME_TREND_TTL + 1
+            if 0 <= age < TIMEFRAME_TREND_TTL and all(previous_trends.get(label) for label in ("15M", "1H", "4H")):
+                return {label: previous_trends.get(label) for label in ("15M", "1H", "4H")}
+
+            async with self._timeframe_trend_semaphore:
+                fetched = await asyncio.wait_for(
+                    asyncio.gather(
+                        self.rest.fetch_klines(symbol, "15m", 160),
+                        self.rest.fetch_klines(symbol, "1h", 80),
+                        self.rest.fetch_klines(symbol, "4h", 120),
+                        return_exceptions=True,
+                    ),
+                    timeout=6.0,
+                )
+            rows_by_interval = {
+                interval: (fetched[index] if not isinstance(fetched[index], Exception) else [])
+                for index, interval in enumerate(("15m", "1h", "4h"))
+            }
+            fresh = await asyncio.to_thread(_timeframe_trends_from_rows, rows_by_interval)
+            # Preserve a known real trend when Binance returns an incomplete frame.
+            trends = {
+                label: fresh.get(label) or previous_trends.get(label)
+                for label in ("15M", "1H", "4H")
+            }
+            updated = self.clock()
+            if any(trends.values()):
+                await self.cache.set_json(cache_key, {
+                    "trends": trends, "updated_at": utc_iso(updated),
+                    "updated_epoch": updated, "source": "binance-futures-klines",
+                }, ttl_seconds=TIMEFRAME_TREND_STALE_TTL)
+            else:
+                # Do not cache a blank response over previous data; retry is rate-limited.
+                self._timeframe_trend_retry_after[symbol] = updated + 30.0
+            return trends
+
+    async def timeframe_trends_for_symbols(self, symbols: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, str | None]]:
+        """Return trends from shared cache immediately; fetch missing/stale reads in background."""
         cleaned: list[str] = []
         for raw_symbol in symbols:
             symbol = str(raw_symbol or "").strip().upper()
             if symbol.endswith("USDT") and "_" not in symbol and symbol not in cleaned:
                 cleaned.append(symbol)
+            if len(cleaned) >= 30:
+                break
 
-        async def for_symbol(symbol: str) -> tuple[str, dict[str, str | None]]:
+        result: dict[str, dict[str, str | None]] = {}
+        now = self.clock()
+        for symbol in cleaned:
             cache_key = f"market:timeframe-trends:v1:{symbol}"
             try:
                 cached = await self.cache.get_json(cache_key)
             except Exception:
                 cached = None
             if isinstance(cached, dict) and isinstance(cached.get("trends"), dict):
-                return symbol, {label: cached["trends"].get(label) for label in ("15M", "1H", "4H")}
-
-            lock = self._timeframe_trend_locks.setdefault(symbol, asyncio.Lock())
-            async with lock:
+                trends = {label: cached["trends"].get(label) for label in ("15M", "1H", "4H")}
                 try:
-                    cached = await self.cache.get_json(cache_key)
-                except Exception:
-                    cached = None
-                if isinstance(cached, dict) and isinstance(cached.get("trends"), dict):
-                    return symbol, {label: cached["trends"].get(label) for label in ("15M", "1H", "4H")}
-                async with self._timeframe_trend_semaphore:
-                    fetched = await asyncio.gather(
-                        self.rest.fetch_klines(symbol, "15m", 160),
-                        self.rest.fetch_klines(symbol, "1h", 80),
-                        self.rest.fetch_klines(symbol, "4h", 80),
-                        return_exceptions=True,
-                    )
-                rows_by_interval = {
-                    interval: (fetched[index] if not isinstance(fetched[index], Exception) else [])
-                    for index, interval in enumerate(("15m", "1h", "4h"))
-                }
-                trends = await asyncio.to_thread(_timeframe_trends_from_rows, rows_by_interval)
-                now = self.clock()
-                try:
-                    await self.cache.set_json(cache_key, {
-                        "trends": trends, "updated_at": utc_iso(now), "updated_epoch": now,
-                        "source": "binance-futures-klines",
-                    }, ttl_seconds=TIMEFRAME_TREND_TTL)
-                except Exception:
-                    logger.debug("No se pudo guardar la tendencia de %s en caché", symbol, exc_info=True)
-                return symbol, trends
-
-        rows = await asyncio.gather(*(for_symbol(symbol) for symbol in cleaned), return_exceptions=True)
-        result: dict[str, dict[str, str | None]] = {}
-        for symbol, row in zip(cleaned, rows):
-            if isinstance(row, Exception):
-                logger.debug("Tendencias multi-temporalidad no disponibles para %s: %s", symbol, row)
-                result[symbol] = {"15M": None, "1H": None, "4H": None}
+                    age = max(0.0, now - float(cached.get("updated_epoch", 0) or 0))
+                except (TypeError, ValueError, OverflowError):
+                    age = TIMEFRAME_TREND_TTL + 1
+                result[symbol] = trends
+                if age >= TIMEFRAME_TREND_TTL or not all(trends.values()):
+                    self._schedule_timeframe_trend_refresh(symbol)
             else:
-                result[symbol] = row[1]
+                result[symbol] = {"15M": None, "1H": None, "4H": None}
+                self._schedule_timeframe_trend_refresh(symbol)
         return result
+
+    def timeframe_trends_refreshing(self, symbols: list[str] | tuple[str, ...] | set[str]) -> bool:
+        return any(
+            (task := self._timeframe_trend_tasks.get(str(symbol).strip().upper())) is not None and not task.done()
+            for symbol in symbols
+        )
 
     async def liquidations(self, window_minutes: int = 15) -> dict[str, Any]:
         if window_minutes not in (5, 15, 60):
