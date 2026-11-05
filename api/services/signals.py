@@ -146,11 +146,20 @@ class SignalService:
             logger.exception("Señal no válida en almacenamiento; id=%s", record_id)
             raise SignalDataIntegrityError(f"El registro de señal {record_id} no cumple el contrato canónico") from exc
 
-    def list_visible(self, *, limit: int = 10) -> list[SignalApiResponse]:
+    def list_visible(
+        self, *, limit: int = 10, raw_docs: list[Mapping[str, Any]] | None = None,
+    ) -> list[SignalApiResponse]:
         bounded_limit = max(1, min(limit, 10))
-        # Read a larger candidate window because old/closed/cancelled signals are filtered
-        # after normalization. The repository's own cap limits accidental full scans.
-        raw_docs = self.repository.list_signals(limit=300)
+        if raw_docs is None:
+            candidate_reader = getattr(self.repository, "list_live_candidates", None)
+            if callable(candidate_reader):
+                now_for_query = datetime.now(timezone.utc)
+                raw_docs = candidate_reader(
+                    limit=80,
+                    cancelled_since=now_for_query - timedelta(minutes=self.cancelled_display_minutes),
+                )
+            else:
+                raw_docs = self.repository.list_signals(limit=300)
         now = datetime.now(timezone.utc)
         cancelled_cutoff = now - timedelta(minutes=self.cancelled_display_minutes)
         output: list[SignalApiResponse] = []

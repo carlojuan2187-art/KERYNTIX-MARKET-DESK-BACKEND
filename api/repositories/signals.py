@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 class SignalRepository(Protocol):
     def list_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
+    def list_live_candidates(self, *, limit: int = 80, cancelled_since: datetime | None = None) -> list[Mapping[str, Any]]: ...
     def latest_by_symbol(self, symbol: str) -> Mapping[str, Any] | None: ...
     def list_results(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
     def list_results_for_period(self, *, start: datetime | None = None) -> list[Mapping[str, Any]]: ...
@@ -61,6 +62,26 @@ class InMemorySignalRepository:
                 reverse=True,
             )
             return [dict(doc) for doc in ordered[:limit]]
+
+    def list_live_candidates(self, *, limit: int = 80, cancelled_since: datetime | None = None) -> list[Mapping[str, Any]]:
+        cutoff = _parse_datetime(cancelled_since) if cancelled_since is not None else datetime.now(timezone.utc) - timedelta(minutes=30)
+        rows = self.list_signals(limit=min(1000, max(1, len(self._documents))))
+        visible: list[Mapping[str, Any]] = []
+        for row in rows:
+            lifecycle = row.get("lifecycle") if isinstance(row.get("lifecycle"), Mapping) else {}
+            status = str(row.get("status") or lifecycle.get("status") or "").upper()
+            if status in {"PENDING", "TOUCHED"}:
+                visible.append(row)
+                continue
+            if status == "CANCELLED":
+                cancelled_at = _parse_datetime(row.get("cancelled_at") or lifecycle.get("cancelled_at") or row.get("created_at"))
+                if cancelled_at is not None and cancelled_at >= cutoff:
+                    visible.append(row)
+                continue
+            outcome = row.get("outcome") if isinstance(row.get("outcome"), Mapping) else {}
+            if not status and str(outcome.get("state") or "").upper() in {"OPEN", "TP1_HIT"}:
+                visible.append(row)
+        return visible[:max(1, min(int(limit), 200))]
 
     def latest_by_symbol(self, symbol: str) -> Mapping[str, Any] | None:
         normalized = symbol.strip().upper()
@@ -148,6 +169,9 @@ class MongoSignalRepository:
             # old 9s request deadline. The compound index also serves latest_by_symbol.
             signal_collection.create_index([("created_at", -1)])
             signal_collection.create_index([("symbol", 1), ("created_at", -1)])
+            signal_collection.create_index([("status", 1), ("created_at", -1)])
+            signal_collection.create_index([("lifecycle.status", 1), ("created_at", -1)])
+            signal_collection.create_index([("outcome.state", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
         except Exception:
@@ -174,6 +198,28 @@ class MongoSignalRepository:
     def list_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
         try:
             cursor = self._collection.find({}).sort("created_at", -1).limit(max(1, min(limit, 1000)))
+            return self._query(cursor)
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_live_candidates(self, *, limit: int = 80, cancelled_since: datetime | None = None) -> list[Mapping[str, Any]]:
+        """Fetch only records that can appear in the live signal feed.
+
+        This avoids reading and normalizing hundreds of already-closed records on
+        every page visit. Root and lifecycle status paths are both supported for
+        legacy bot documents.
+        """
+        cutoff = _parse_datetime(cancelled_since) if cancelled_since is not None else datetime.now(timezone.utc) - timedelta(minutes=30)
+        query = {"$or": [
+            {"status": {"$in": ["PENDING", "TOUCHED"]}},
+            {"lifecycle.status": {"$in": ["PENDING", "TOUCHED"]}},
+            {"outcome.state": {"$in": ["OPEN", "TP1_HIT"]}, "status": {"$exists": False}},
+            {"status": "CANCELLED", "cancelled_at": {"$gte": cutoff}},
+            {"lifecycle.status": "CANCELLED", "lifecycle.cancelled_at": {"$gte": cutoff}},
+            {"status": "CANCELLED", "cancelled_at": {"$exists": False}, "created_at": {"$gte": cutoff}},
+        ]}
+        try:
+            cursor = self._collection.find(query).sort("created_at", -1).limit(max(1, min(int(limit), 200)))
             return self._query(cursor)
         except Exception as exc:
             self._raise_storage_error(exc)

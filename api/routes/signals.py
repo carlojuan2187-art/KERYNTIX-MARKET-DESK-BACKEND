@@ -1,7 +1,7 @@
 """Read-only HTTP endpoints for KERYNTIX MARKET DESK signals."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 
 from api.repositories.signals import RepositoryUnavailable
 from api.schemas import SignalApiResponse
@@ -21,15 +21,24 @@ def _service(request: Request) -> SignalService:
 
 
 @router.get("", response_model=list[SignalApiResponse])
-def list_signals(
+async def list_signals(
     request: Request,
+    response: Response,
     limit: int = Query(default=10, ge=1, le=10),
     _principal: Principal = Depends(require_analytical_access),
 ) -> list[SignalApiResponse]:
     try:
-        return _service(request).list_visible(limit=limit)
+        # The shared Redis snapshot is refreshed off-request. A slow Mongo read
+        # must not make every visitor wait 20 seconds for the same 10 live cards.
+        records, refreshing, updated_at = await request.app.state.market_intelligence_service.signal_records(wait_seconds=1.5)
+        rows = _service(request).list_visible(limit=limit, raw_docs=records)
+        response.headers["X-Keryntix-Signals-Status"] = "refreshing" if refreshing else "ready"
+        if updated_at:
+            response.headers["X-Keryntix-Signals-Updated-At"] = updated_at
+        response.headers["Cache-Control"] = "private, max-age=2, stale-while-revalidate=30"
+        return rows
     except RepositoryUnavailable as exc:
-        raise HTTPException(status_code=503, detail={"code": "DATA_UNAVAILABLE", "message": "Los datos de señales no están disponibles temporalmente."}) from exc
+        raise HTTPException(status_code=503, headers={"Retry-After": "2"}, detail={"code": "DATA_UNAVAILABLE", "message": "El feed de señales se está sincronizando. Se reintentará automáticamente."}) from exc
     except SignalDataIntegrityError as exc:
         raise HTTPException(status_code=503, detail={"code": "SIGNAL_DATA_INVALID", "message": "Hay una señal almacenada que no cumple el contrato de datos."}) from exc
 

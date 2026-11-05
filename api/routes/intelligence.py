@@ -46,7 +46,7 @@ async def get_radar(
 ) -> dict[str, Any]:
     try:
         result = await request.app.state.market_intelligence_service.radar(force_refresh=refresh)
-        records = await asyncio.to_thread(request.app.state.signal_repository.list_signals, limit=200)
+        records, setups_refreshing, signal_updated_at = await request.app.state.market_intelligence_service.signal_records(wait_seconds=0.5)
     except AnalyticsIntelligenceUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "RADAR_UNAVAILABLE", "message": "El radar está recopilando cotizaciones y velas del mercado."}) from exc
     except RepositoryUnavailable as exc:
@@ -90,6 +90,8 @@ async def get_radar(
             break
     output = dict(result)
     output["setups"] = setups
+    output["setups_refreshing"] = bool(setups_refreshing)
+    output["setups_updated_at"] = signal_updated_at
 
     # The radar snapshot scans the most liquid pairs, but active setups and old
     # observed sweeps can reference other symbols. Enrich every displayed symbol
@@ -122,7 +124,11 @@ async def get_radar(
     # only a few active setups missing from the cached scan to bound request time.
     trends = dict(existing_trends)
     if not result.get("refreshing"):
-        missing = [symbol for symbol in trend_symbols if symbol not in trends][:4]
+        missing = [
+            symbol for symbol in trend_symbols
+            if not isinstance(trends.get(symbol), dict)
+            or any(trends.get(symbol, {}).get(label) is None for label in ("15M", "1H", "4H"))
+        ][:4]
         if missing:
             try:
                 trends.update(await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(missing))
@@ -130,6 +136,7 @@ async def get_radar(
                 # Trend enrichment is optional; it must not make the entire radar unavailable.
                 pass
     output["timeframe_trends"] = trends
+    output["timeframe_trends_refreshing"] = request.app.state.market_intelligence_service.timeframe_trends_refreshing(trend_symbols)
 
     response.headers["X-FTrade-Radar-Source"] = str(result.get("source", ""))
     response.headers["X-FTrade-Radar-Updated-At"] = str(result.get("updated_at", ""))
