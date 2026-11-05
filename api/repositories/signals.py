@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol, Sequence
 
 class SignalRepository(Protocol):
     def list_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
+    def list_active_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
     def latest_by_symbol(self, symbol: str) -> Mapping[str, Any] | None: ...
     def list_results(self, *, limit: int = 100) -> list[Mapping[str, Any]]: ...
     def list_results_for_period(self, *, start: datetime | None = None) -> list[Mapping[str, Any]]: ...
@@ -61,6 +62,21 @@ class InMemorySignalRepository:
                 reverse=True,
             )
             return [dict(doc) for doc in ordered[:limit]]
+
+    def list_active_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
+        """Return only pending, touched or recently cancelled candidates."""
+        rows = self.list_signals(limit=len(self._documents))
+        active = []
+        for doc in rows:
+            lifecycle = doc.get("lifecycle") if isinstance(doc.get("lifecycle"), Mapping) else {}
+            outcome = doc.get("outcome") if isinstance(doc.get("outcome"), Mapping) else {}
+            status = str(doc.get("status") or lifecycle.get("status") or "").upper()
+            state = str(outcome.get("state") or "").upper()
+            if status in {"PENDING", "TOUCHED", "CANCELLED"} or state in {"OPEN", "TP1_HIT"}:
+                active.append(doc)
+                if len(active) >= max(1, min(int(limit), 500)):
+                    break
+        return active
 
     def latest_by_symbol(self, symbol: str) -> Mapping[str, Any] | None:
         normalized = symbol.strip().upper()
@@ -148,6 +164,9 @@ class MongoSignalRepository:
             # old 9s request deadline. The compound index also serves latest_by_symbol.
             signal_collection.create_index([("created_at", -1)])
             signal_collection.create_index([("symbol", 1), ("created_at", -1)])
+            signal_collection.create_index([("status", 1), ("created_at", -1)])
+            signal_collection.create_index([("lifecycle.status", 1), ("created_at", -1)])
+            signal_collection.create_index([("outcome.state", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
         except Exception:
@@ -174,6 +193,21 @@ class MongoSignalRepository:
     def list_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
         try:
             cursor = self._collection.find({}).sort("created_at", -1).limit(max(1, min(limit, 1000)))
+            return self._query(cursor)
+        except Exception as exc:
+            self._raise_storage_error(exc)
+
+    def list_active_signals(self, *, limit: int = 100) -> list[Mapping[str, Any]]:
+        """Use indexed status predicates instead of scanning recent closed history."""
+        query = {
+            "$or": [
+                {"status": {"$in": ["PENDING", "TOUCHED", "CANCELLED"]}},
+                {"lifecycle.status": {"$in": ["PENDING", "TOUCHED", "CANCELLED"]}},
+                {"outcome.state": {"$in": ["OPEN", "TP1_HIT"]}},
+            ]
+        }
+        try:
+            cursor = self._collection.find(query).sort("created_at", -1).limit(max(1, min(int(limit), 500)))
             return self._query(cursor)
         except Exception as exc:
             self._raise_storage_error(exc)
