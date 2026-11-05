@@ -148,9 +148,13 @@ class SignalService:
 
     def list_visible(self, *, limit: int = 10) -> list[SignalApiResponse]:
         bounded_limit = max(1, min(limit, 10))
-        # Read a larger candidate window because old/closed/cancelled signals are filtered
-        # after normalization. The repository's own cap limits accidental full scans.
-        raw_docs = self.repository.list_signals(limit=300)
+        # Prefer the repository's indexed active-state query. Closed history is
+        # not part of the live Signals screen and must not be scanned on every visit.
+        active_reader = getattr(self.repository, "list_active_signals", None)
+        if callable(active_reader):
+            raw_docs = active_reader(limit=max(80, bounded_limit * 8))
+        else:
+            raw_docs = self.repository.list_signals(limit=100)
         now = datetime.now(timezone.utc)
         cancelled_cutoff = now - timedelta(minutes=self.cancelled_display_minutes)
         output: list[SignalApiResponse] = []
@@ -160,6 +164,8 @@ class SignalService:
             # Closed INVALID records remain auditable in storage but are no longer
             # active pending/touched/cancelled cards in the live signals feed.
             if signal.outcome.state == OutcomeState.CLOSED or projected.operation_result in {"TP1", "TP2", "SL"}:
+                continue
+            if projected.status == SignalStatus.PENDING and projected.expires_at is not None and projected.expires_at <= now:
                 continue
             if projected.status == SignalStatus.CANCELLED:
                 cancelled_at = projected.cancelled_at or projected.created_at
