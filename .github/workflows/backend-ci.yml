@@ -23,14 +23,15 @@ jobs:
         run: python -m pytest -q test/test_market_loading.py test/test_market_feed.py test/test_market_analytics_api.py --disable-warnings
       - name: Compile all Python modules
         run: python -m compileall -q api domain engine worker main.py scripts test
-      - name: Run release preflight
-        env:
-          PYTHONPATH: .
-        run: python -m scripts.release_preflight --json
       - name: Run unit and API contract tests
         env:
           PYTHONPATH: .
         run: python -m pytest -q --disable-warnings --maxfail=1
+      - name: Run release preflight
+        if: always()
+        env:
+          PYTHONPATH: .
+        run: python -m scripts.release_preflight --json
 
   live-mongodb-redis-integration:
     runs-on: ubuntu-latest
