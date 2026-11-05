@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -37,6 +38,39 @@ def _clean_setup(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+async def _radar_active_records(request: Request) -> list[dict[str, Any]]:
+    """Read active setups from a tiny shared snapshot; do not scan closed history per page view."""
+    cache = request.app.state.market_cache
+    key = "signals:radar-active:v1"
+    cached_rows: list[dict[str, Any]] | None = None
+    cached_age = float("inf")
+    try:
+        cached = await cache.get_json(key)
+        if isinstance(cached, dict) and isinstance(cached.get("items"), list):
+            cached_rows = cached["items"]
+            cached_age = max(0.0, time.time() - float(cached.get("updated_epoch", 0) or 0))
+    except Exception:
+        cached_rows = None
+    if cached_rows is not None and cached_age <= 5.0:
+        return cached_rows
+
+    try:
+        repository = request.app.state.signal_repository
+        reader = getattr(repository, "list_active_signals", None)
+        if not callable(reader):
+            reader = repository.list_signals
+        records = await asyncio.wait_for(asyncio.to_thread(reader, limit=150), timeout=3.0)
+        rows = [dict(row) for row in records]
+        try:
+            await cache.set_json(key, {"items": rows, "updated_epoch": time.time()}, ttl_seconds=60)
+        except Exception:
+            pass
+        return rows
+    except Exception:
+        # Radar still renders its market snapshot when signal storage is briefly slow.
+        return cached_rows or []
+
+
 @router.get("/radar")
 async def get_radar(
     request: Request,
@@ -46,11 +80,9 @@ async def get_radar(
 ) -> dict[str, Any]:
     try:
         result = await request.app.state.market_intelligence_service.radar(force_refresh=refresh)
-        records = await asyncio.to_thread(request.app.state.signal_repository.list_signals, limit=200)
     except AnalyticsIntelligenceUnavailable as exc:
         raise HTTPException(status_code=503, detail={"code": "RADAR_UNAVAILABLE", "message": "El radar está recopilando cotizaciones y velas del mercado."}) from exc
-    except RepositoryUnavailable as exc:
-        raise HTTPException(status_code=503, detail={"code": "SIGNALS_UNAVAILABLE", "message": "No se pudieron leer los setups activos."}) from exc
+    records = await _radar_active_records(request)
     # A live five-day trial has the same feature entitlement as a paid Premium
     # subscription. Do not infer Premium access from the stored plan label alone:
     # trial accounts intentionally keep plan="free" until they purchase.
@@ -121,15 +153,18 @@ async def get_radar(
     # candle requests in the same HTTP request. On a fresh snapshot, supplement
     # only a few active setups missing from the cached scan to bound request time.
     trends = dict(existing_trends)
-    if not result.get("refreshing"):
-        missing = [symbol for symbol in trend_symbols if symbol not in trends][:4]
-        if missing:
-            try:
-                trends.update(await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(missing))
-            except Exception:
-                # Trend enrichment is optional; it must not make the entire radar unavailable.
-                pass
+    missing = [symbol for symbol in trend_symbols if symbol not in trends][:4]
+    trends_refreshing = False
+    if missing:
+        try:
+            # This is cache-first. Missing candle reads are scheduled in the background
+            # and never hold the Radar HTTP request open.
+            trends.update(await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(missing))
+            trends_refreshing = request.app.state.market_intelligence_service.timeframe_trends_refreshing(missing)
+        except Exception:
+            pass
     output["timeframe_trends"] = trends
+    output["timeframe_trends_refreshing"] = trends_refreshing
 
     response.headers["X-FTrade-Radar-Source"] = str(result.get("source", ""))
     response.headers["X-FTrade-Radar-Updated-At"] = str(result.get("updated_at", ""))
