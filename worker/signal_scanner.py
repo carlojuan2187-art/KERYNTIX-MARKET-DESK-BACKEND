@@ -567,7 +567,7 @@ async def _run_worker() -> None:
     sweeps = sweep_store_from_environment()
     cache = cache_from_environment()
     rest = BinanceRestClient()
-    notifier = UserAlertProcessor(auth, features, cache)
+    notifier = UserAlertProcessor(auth, features, cache, signal_repository=repository)
     scanner = SignalScanner(rest, repository, sweeps, cache=cache, signal_notifier=notifier)
     logger.info("Worker de señales iniciado; almacenamiento=%s; notificaciones=activas", repo_health.get("adapter"))
     try:

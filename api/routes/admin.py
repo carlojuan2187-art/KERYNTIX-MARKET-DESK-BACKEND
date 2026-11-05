@@ -86,11 +86,12 @@ def stats_reset(body: StatsResetRequest, request: Request, principal: Principal 
     from api.services import stats_baseline as baseline
     if not body.confirm:
         raise HTTPException(status_code=422, detail={"code": "CONFIRMATION_REQUIRED", "message": "Confirma el reinicio de estadísticas."})
-    reason = body.reason.strip()
+    # The reset event has one canonical audit reason, shared by the platform and every account.
+    reason = "Reinicio por optimización de estrategia"
     if not 5 <= len(reason) <= 500:
         raise HTTPException(status_code=422, detail={"code": "INVALID_REASON", "message": "Indica una razón de 5 a 500 caracteres."})
     moment = baseline.apply_reset(request.app.state.business_repository, actor_id=principal.user_id, reason=reason)
-    _audit(request, principal.user_id, "stats_reset", "platform", {"reason": reason, "reset_at": moment.isoformat()})
+    _audit(request, principal.user_id, "stats_reset", "platform", {"reason": reason, "reset_at": moment.isoformat(), "scope": "global_and_personal"})
     return baseline.describe(request.app.state.business_repository, request.app.state.signal_repository)
 
 
