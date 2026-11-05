@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_5_plus_pullback_reentry_structural_tp2"
+SCORE_CALIBRATION_VERSION = "v4_6_plus_confirmation_quality_tp1_tp2"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -83,10 +83,10 @@ PLUS_PROFILE = {
     "liquidity_tolerance_atr": breakout._env_float("LSR_PLUS_LIQUIDITY_TOLERANCE_ATR", 0.50),
     "min_sweep_atr": breakout._env_float("LSR_PLUS_MIN_SWEEP_ATR", 0.10),
     "min_rel_volume": breakout._env_float("LSR_PLUS_MIN_REL_VOLUME", 0.76),
-    "min_confirm_rel_volume": breakout._env_float("LSR_PLUS_MIN_CONFIRM_REL_VOLUME", 0.82),
+    "min_confirm_rel_volume": breakout._env_float("LSR_PLUS_MIN_CONFIRM_REL_VOLUME", 0.84),
     "min_body_ratio_recovery": breakout._env_float("LSR_PLUS_MIN_BODY_RATIO_RECOVERY", 0.17),
     "min_body_ratio_confirmation": breakout._env_float("LSR_PLUS_MIN_BODY_RATIO_CONFIRMATION", 0.15),
-    "min_close_position": breakout._env_float("LSR_PLUS_MIN_CLOSE_POSITION", 0.53),
+    "min_close_position": breakout._env_float("LSR_PLUS_MIN_CLOSE_POSITION", 0.55),
     "min_rr": breakout._env_float("LSR_PLUS_MIN_RR", 0.90),
     "htf_price_tolerance": breakout._env_float("LSR_PLUS_HTF_PRICE_TOLERANCE", 0.0110),
     "htf_trend_tolerance": breakout._env_float("LSR_PLUS_HTF_TREND_TOLERANCE", 0.0200),
