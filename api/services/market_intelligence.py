@@ -534,6 +534,24 @@ class MarketIntelligenceService:
         return task
 
     async def _refresh_timeframe_trend(self, symbol: str) -> None:
+        token = uuid.uuid4().hex
+        lease_key = f"market:timeframe-trends:refresh-lock:v1:{symbol}"
+        try:
+            acquired = await self.cache.acquire_lease(lease_key, token, ttl_seconds=20)
+        except Exception:
+            logger.debug("No se pudo adquirir el bloqueo distribuido de tendencia para %s", symbol, exc_info=True)
+            acquired = True
+        if not acquired:
+            raise _RefreshLeaseBusy(f"La tendencia de {symbol} ya se está calculando en otra instancia.")
+        try:
+            await self._refresh_timeframe_trend_unlocked(symbol)
+        finally:
+            try:
+                await self.cache.release_lease(lease_key, token)
+            except Exception:
+                logger.debug("No se pudo liberar el bloqueo de tendencia para %s", symbol, exc_info=True)
+
+    async def _refresh_timeframe_trend_unlocked(self, symbol: str) -> None:
         cache_key = f"market:timeframe-trends:v1:{symbol}"
         async with self._timeframe_trend_locks.setdefault(symbol, asyncio.Lock()):
             cached = await self.cache.get_json(cache_key)
