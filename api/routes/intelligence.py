@@ -110,10 +110,26 @@ async def get_radar(
             if isinstance(entry, dict):
                 include_symbol(entry.get("symbol"))
     existing_trends = result.get("timeframe_trends")
+    existing_trends = existing_trends if isinstance(existing_trends, dict) else {}
     if isinstance(existing_trends, dict):
         for symbol in existing_trends:
             include_symbol(symbol)
-    output["timeframe_trends"] = await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(trend_symbols)
+
+    # The radar scan fetches multiple candle intervals for up to 18 assets.
+    # While its shared snapshot is being refreshed, serve the last known trends
+    # (or an empty map on cold start) instead of launching another batch of REST
+    # candle requests in the same HTTP request. On a fresh snapshot, supplement
+    # only a few active setups missing from the cached scan to bound request time.
+    trends = dict(existing_trends)
+    if not result.get("refreshing"):
+        missing = [symbol for symbol in trend_symbols if symbol not in trends][:4]
+        if missing:
+            try:
+                trends.update(await request.app.state.market_intelligence_service.timeframe_trends_for_symbols(missing))
+            except Exception:
+                # Trend enrichment is optional; it must not make the entire radar unavailable.
+                pass
+    output["timeframe_trends"] = trends
 
     response.headers["X-FTrade-Radar-Source"] = str(result.get("source", ""))
     response.headers["X-FTrade-Radar-Updated-At"] = str(result.get("updated_at", ""))
