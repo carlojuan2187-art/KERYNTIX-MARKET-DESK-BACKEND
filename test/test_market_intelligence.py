@@ -124,7 +124,7 @@ def test_radar_service_returns_auditable_source_and_caches_result():
     run(setup())
     rest = FakeRest()
     service = MarketIntelligenceService(cache, rest, InMemorySignalRepository([]), InMemorySweepStore())
-    data = run(service.radar())
+    data = run(service.radar(force_refresh=True))
     count = len(rest.calls)
     again = run(service.radar())
     assert data["source"] == "binance-futures-klines-and-observed-sweeps"
@@ -137,6 +137,30 @@ def test_radar_service_returns_auditable_source_and_caches_result():
     assert len(rest.calls) == count
     assert again["updated_at"] == data["updated_at"]
 
+
+
+def test_radar_cold_request_returns_immediately_and_background_refresh_populates_cache():
+    cache = InMemoryJsonCache()
+    run(cache.set_json(QUOTES_KEY, {
+        "BTCUSDT": {"symbol": "BTCUSDT", "price": 100, "volume_24h": 2_000_000_000, "change_pct": 1.0},
+    }, ttl_seconds=100))
+    run(cache.set_json(FUNDING_KEY, [{"symbol": "BTCUSDT", "lastFundingRate": 0.0001}], ttl_seconds=100))
+    service = MarketIntelligenceService(cache, FakeRest(), InMemorySignalRepository([]), InMemorySweepStore())
+
+    async def scenario():
+        first = await service.radar()
+        assert first["status"] == "warming"
+        assert first["refreshing"] is True
+        task = service._radar_refresh_task
+        assert task is not None
+        await task
+        second = await service.radar()
+        return second
+
+    data = run(scenario())
+    assert data["status"] in {"ok", "partial", "degraded"}
+    assert data["source"] == "binance-futures-klines-and-observed-sweeps"
+    assert data["scanned"] >= 1
 
 def test_radar_includes_premium_visibility_setups_during_full_five_day_trial():
     cache = InMemoryJsonCache()
@@ -241,9 +265,9 @@ def test_new_intelligence_routes_enforce_windows_and_return_expected_shapes():
     assert overview.status_code == 200
     assert radar.status_code == 200 and "setups" in radar.json()
     assert radar.json()["setups"][0]["symbol"] == "BTCUSDT"
-    timeframe_trends = radar.json()["timeframe_trends"]["BTCUSDT"]
-    assert timeframe_trends["15M"] is not None
-    assert timeframe_trends["1H"] is not None
-    assert timeframe_trends["4H"] is not None
+    # Cold-start radar replies with a lightweight warming snapshot. The shared
+    # background refresh will populate trend details for subsequent requests.
+    assert radar.json()["status"] == "warming"
+    assert radar.json()["refreshing"] is True
     assert movers.status_code == 200 and movers.json()["status"] == "collecting"
     assert lq.status_code == 200 and "total" in lq.json()

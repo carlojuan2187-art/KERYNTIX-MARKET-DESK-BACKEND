@@ -59,6 +59,28 @@ def setup():
     return app, auth, features, cache, principal
 
 
+
+def test_empty_watchlist_returns_without_market_or_signal_history_queries():
+    app, _auth, _features, _cache, _principal = setup()
+
+    class NoMarketCalls:
+        async def quotes(self):
+            raise AssertionError("empty watchlist must not fetch market quotes")
+
+    class NoSignalHistoryCalls:
+        def list_signals(self, *, limit=100):
+            raise AssertionError("empty watchlist must not query signal history")
+
+    app.state.watchlist_service.market = NoMarketCalls()
+    app.state.watchlist_service.signals = NoSignalHistoryCalls()
+    with TestClient(app) as client:
+        response = client.get("/watchlist")
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["items"] == []
+    assert payload["total"] == 0
+    assert payload["status"] == "empty"
+
 def test_watchlist_add_list_remove_and_normalization():
     app, auth, _features, _cache, principal = setup()
     with TestClient(app) as client:
