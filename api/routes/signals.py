@@ -101,9 +101,12 @@ def get_signal_by_symbol(
         raise HTTPException(status_code=503, detail={"code": "SIGNAL_DATA_INVALID", "message": "La señal almacenada no cumple el contrato de datos."}) from exc
     if signal is None:
         raise HTTPException(status_code=404, detail={"code": "SIGNAL_NOT_FOUND", "message": f"No se encontró una señal para {normalized}."})
-    request.app.state.signal_repository.record_user_deliveries(
-        _principal.user_id,
-        [str(signal.id)],
-        delivered_at=datetime.now(timezone.utc),
-    )
+    try:
+        request.app.state.signal_repository.record_user_deliveries(
+            _principal.user_id,
+            [str(signal.id)],
+            delivered_at=datetime.now(timezone.utc),
+        )
+    except RepositoryUnavailable as exc:
+        raise HTTPException(status_code=503, detail={"code": "DELIVERY_LOG_UNAVAILABLE", "message": "No se pudo registrar la entrega de la señal. Inténtalo de nuevo."}) from exc
     return signal
