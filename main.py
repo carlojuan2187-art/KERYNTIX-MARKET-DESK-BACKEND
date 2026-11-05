@@ -241,7 +241,25 @@ def create_app(
     selected_repository = repository or repository_from_environment()
     selected_auth_repository = auth_repository or auth_repository_from_environment()
     selected_cache = market_cache or cache_from_environment()
-    selected_rest = market_rest_client or BinanceRestClient()
+    # The API serves user-facing reads and must fail fast rather than letting a
+    # three-retry exchange timeout occupy request workers. Trading workers create
+    # their own client and keep their independent scan/retry policy.
+    try:
+        market_api_timeout = max(2.0, min(8.0, float(os.getenv("MARKET_API_BINANCE_TIMEOUT_SECONDS", "5"))))
+    except (TypeError, ValueError):
+        market_api_timeout = 5.0
+    try:
+        market_api_connections = max(4, min(16, int(os.getenv("MARKET_API_BINANCE_MAX_CONNECTIONS", "8"))))
+    except (TypeError, ValueError):
+        market_api_connections = 8
+    try:
+        market_api_concurrency = max(2, min(market_api_connections, int(os.getenv("MARKET_API_BINANCE_CONCURRENCY", "4"))))
+    except (TypeError, ValueError):
+        market_api_concurrency = 4
+    selected_rest = market_rest_client or BinanceRestClient(
+        timeout_seconds=market_api_timeout, retries=1,
+        max_connections=market_api_connections, concurrency=market_api_concurrency,
+    )
     selected_telegram = telegram_gateway or TelegramBotAPI()
     if user_feature_repository is not None:
         selected_user_features = user_feature_repository
