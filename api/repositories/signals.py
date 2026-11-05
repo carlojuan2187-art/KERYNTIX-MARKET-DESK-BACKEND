@@ -139,14 +139,21 @@ class MongoSignalRepository:
             **mongo_pool_options(),
         )
         db = client[database_name]
+        signal_collection = db[os.getenv("SIGNALS_COLLECTION", "signals")]
         result_collection = db[os.getenv("SIGNAL_RESULTS_COLLECTION", "signal_results")]
         try:
+            # These endpoints repeatedly read the newest signal documents. Without
+            # this index MongoDB must scan and sort the entire signals collection;
+            # its 10s server-selection/socket timeout is longer than the frontend's
+            # old 9s request deadline. The compound index also serves latest_by_symbol.
+            signal_collection.create_index([("created_at", -1)])
+            signal_collection.create_index([("symbol", 1), ("created_at", -1)])
             result_collection.create_index("signal_id", unique=True)
             result_collection.create_index([("closed_at", -1)])
         except Exception:
             client.close()
             raise
-        return cls(db[os.getenv("SIGNALS_COLLECTION", "signals")], client, database_name=database_name, results_collection=result_collection)
+        return cls(signal_collection, client, database_name=database_name, results_collection=result_collection)
 
     def _query(self, cursor: Any) -> list[Mapping[str, Any]]:
         try:
