@@ -118,13 +118,17 @@ def validate_prepublication_setup(
         if price <= tp1:
             return False, CANCEL_TP_REACHED_BEFORE_ENTRY
         gap = zone_low - price
-    atr_value = _price(signal.get("atr_value"))
-    if atr_value > 0:
-        distance_atr = gap / atr_value
-        if distance_atr < MIN_PREENTRY_DISTANCE_ATR:
-            return False, "ENTRY_ZONE_TOO_CLOSE_TO_PUBLISH"
-        if distance_atr > MAX_PREENTRY_DISTANCE_ATR:
-            return False, "ENTRY_ZONE_TOO_FAR_TO_PUBLISH"
+    # HADES strategies already apply their own first-touch/reset and distance
+    # rules. Keep KERYNTIX's legacy ATR-distance gate only for legacy candidates.
+    strategy_name = str(signal.get("strategy_name") or "").strip().lower()
+    if strategy_name not in {"breakout_reset", "liquidity_sweep_reversal"}:
+        atr_value = _price(signal.get("atr_value"))
+        if atr_value > 0:
+            distance_atr = gap / atr_value
+            if distance_atr < MIN_PREENTRY_DISTANCE_ATR:
+                return False, "ENTRY_ZONE_TOO_CLOSE_TO_PUBLISH"
+            if distance_atr > MAX_PREENTRY_DISTANCE_ATR:
+                return False, "ENTRY_ZONE_TOO_FAR_TO_PUBLISH"
     for candle in candles:
         event = candle_event(signal, candle)
         if event:
