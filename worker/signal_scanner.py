@@ -25,7 +25,10 @@ from api.repositories.sweeps import (
 )
 from domain.signals import adapt_bot_signal
 from engine.dual_strategy_adapter import prepare_candidate
-from engine.strategy_market_regime import BTC_REGIME_SYMBOL, classify_market_regime
+from engine.strategy_market_regime import (
+    BTC_REGIME_SYMBOL, MARKET_REGIME_FAIL_OPEN, MARKET_REGIME_TERMINAL_RISK_OFF,
+    classify_market_regime,
+)
 from engine.strategy_router import route_candidate
 from engine.prepublication import validate_prepublication_setup
 from worker.binance_rest import BinanceRestClient
@@ -352,10 +355,15 @@ class SignalScanner:
 
         # HADES router regime is evaluated once per scan from BTC closed candles.
         # Fail-open routes to Breakout Reset first; the router may then try LSR.
+        fallback_strategy = (
+            "breakout_reset" if MARKET_REGIME_FAIL_OPEN
+            else "risk_off" if MARKET_REGIME_TERMINAL_RISK_OFF
+            else "liquidity_sweep_reversal"
+        )
         market_regime: dict[str, Any] = {
             "state": "unknown",
-            "strategy_name": "breakout_reset",
-            "reason": "btc_regime_not_available_fail_open",
+            "strategy_name": fallback_strategy,
+            "reason": "btc_regime_not_available",
         }
         try:
             btc_5m_rows, btc_15m_rows = await asyncio.gather(
