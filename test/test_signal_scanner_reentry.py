@@ -45,3 +45,20 @@ def test_missing_sweep_time_fails_closed_only_for_same_side_after_sl():
     assert not _fresh_sweep_after_last_sl(
         {"symbol": "BTCUSDT", "direction": "LONG"}, latest
     )
+
+
+def test_breakout_reset_stop_does_not_block_liquidity_sweep_reentry():
+    lsr_stopped_at = datetime(2026, 11, 4, 10, 0, tzinfo=timezone.utc)
+    breakout_stopped_at = lsr_stopped_at + timedelta(minutes=30)
+    rows = [
+        {
+            "symbol": "BTCUSDT", "direction": "LONG", "result": "SL",
+            "strategy_name": "liquidity_sweep_reversal", "closed_at": lsr_stopped_at,
+        },
+        {
+            "symbol": "BTCUSDT", "direction": "LONG", "result": "SL",
+            "strategy_name": "breakout_reset", "closed_at": breakout_stopped_at,
+        },
+    ]
+    latest = _latest_sl_by_symbol_direction(rows)
+    assert latest[("BTCUSDT", "LONG")] == lsr_stopped_at
