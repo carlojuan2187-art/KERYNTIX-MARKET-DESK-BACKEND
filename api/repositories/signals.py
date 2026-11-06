@@ -73,18 +73,21 @@ def _closed_result_snapshot(signal: Mapping[str, Any]) -> dict[str, Any] | None:
     if result not in {"TP1", "TP2", "SL"} or closed_at is None or raw_r is None:
         return None
     try:
-        from engine.outcome_logic import build_result_doc, trade_levels
+        from engine.outcome_logic import _dt, build_result_doc, trade_levels
         levels = trade_levels(dict(signal))
         if levels is None:
+            return None
+        normalized_closed_at = _dt(closed_at)
+        if normalized_closed_at is None:
             return None
         closed = {
             "result": result,
             "outcome": "win" if result in {"TP1", "TP2"} else "loss",
             "r_real": float(raw_r),
             "ambiguous": bool(outcome.get("ambiguous", False)),
-            "closed_at": closed_at,
-            "tp1_at": outcome.get("tp1_at"),
-            "tp2_at": outcome.get("tp2_at"),
+            "closed_at": normalized_closed_at,
+            "tp1_at": _dt(outcome.get("tp1_at")),
+            "tp2_at": _dt(outcome.get("tp2_at")),
             "exit_price": outcome.get("exit_price"),
             "exit_trigger_price": outcome.get("exit_trigger_price"),
             "via": outcome.get("exit_via"),
