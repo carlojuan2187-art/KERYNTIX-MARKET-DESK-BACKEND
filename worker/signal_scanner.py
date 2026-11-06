@@ -24,7 +24,9 @@ from api.repositories.sweeps import (
     RETENTION_MINUTES, SweepStore, sweep_store_from_environment,
 )
 from domain.signals import adapt_bot_signal
-from engine.liquidity_strategy import mtf_strategies_by_plan
+from engine.dual_strategy_adapter import prepare_candidate
+from engine.strategy_market_regime import BTC_REGIME_SYMBOL, classify_market_regime
+from engine.strategy_router import route_candidate
 from engine.prepublication import validate_prepublication_setup
 from worker.binance_rest import BinanceRestClient
 
@@ -324,11 +326,24 @@ class SignalScanner:
                 symbols.append(symbol)
         # Keep deterministic order for repeatable ranking in ties.
         symbols = sorted(set(symbols))
+
+        # HADES router regime is evaluated once per scan from BTC closed candles.
+        # Fail-open routes to Breakout Reset first; the router may then try LSR.
+        market_regime: dict[str, Any] = {
+            "state": "unknown",
+            "strategy_name": "breakout_reset",
+            "reason": "btc_regime_not_available_fail_open",
+        }
         try:
-            active_sweeps = self.sweep_store.load_active(now=now)
+            btc_5m_rows, btc_15m_rows = await asyncio.gather(
+                self._throttled(self.market_client.fetch_klines, BTC_REGIME_SYMBOL, "5m", 120),
+                self._throttled(self.market_client.fetch_klines, BTC_REGIME_SYMBOL, "15m", 96),
+            )
+            btc_5m = _frame_from_klines(btc_5m_rows)
+            btc_15m = _frame_from_klines(btc_15m_rows)
+            market_regime = classify_market_regime(btc_5m, btc_15m)
         except Exception as exc:
-            active_sweeps = {}
-            logger.warning("No se pudieron cargar barridos activos; el ciclo sigue sin memoria de sweep: %s", exc)
+            logger.warning("No se pudo clasificar el régimen BTC; se aplica fallback de estrategias (%s)", type(exc).__name__)
 
         semaphore = asyncio.Semaphore(self.concurrency)
         observations: list[dict[str, Any]] = []
@@ -344,7 +359,8 @@ class SignalScanner:
                 one_hour, fifteen, five = await asyncio.gather(
                     self._throttled(self.market_client.fetch_klines, symbol, "1h", 200),
                     self._throttled(self.market_client.fetch_klines, symbol, "15m", 200),
-                    self._throttled(self.market_client.fetch_klines, symbol, "5m", 200),
+                    # Breakout Reset PLUS requires 260 closed 5M bars for EMA200 warmup.
+                    self._throttled(self.market_client.fetch_klines, symbol, "5m", 320),
                 )
                 df_1h = _frame_from_klines(one_hour)
                 df_15m = _frame_from_klines(fifteen)
@@ -352,26 +368,22 @@ class SignalScanner:
                 if df_5m.empty:
                     return symbol, {}, {"empty_5m_history": 1}, found_observations
                 reference_price = float(df_5m.iloc[-1]["close"])
-                observed = {
-                    (profile, direction): active_sweeps.get(_observation_key(symbol, profile, direction))
-                    for profile in ("plus",)
-                    for direction in ("LONG", "SHORT")
-                }
-
-                def on_sweep(profile: str, direction: str, sweep: Mapping[str, Any], level: float, candle_time: Any) -> None:
-                    item = _make_observation(symbol, profile, direction, sweep, level, candle_time, now=now)
-                    if item is not None:
-                        found_observations.append(item)
-
-                result = mtf_strategies_by_plan(
-                    df_1h,
-                    df_15m,
-                    df_5m,
+                routed = route_candidate(
+                    symbol=symbol,
+                    df_1h=df_1h,
+                    df_15m=df_15m,
+                    df_5m=df_5m,
+                    market_regime=market_regime,
                     reference_market_price=reference_price,
                     debug_counts=debug_counts,
-                    observed_sweeps=observed,
-                    on_sweep=on_sweep,
                 )
+                prepared = prepare_candidate(
+                    routed,
+                    df_1h=df_1h,
+                    df_15m=df_15m,
+                    df_5m=df_5m,
+                ) if routed else None
+                result = {"premium": prepared} if prepared else {}
                 return symbol, result, debug_counts, found_observations
 
         # Keep task count bounded by configured concurrency. The previous
@@ -439,7 +451,11 @@ class SignalScanner:
             direction = str(candidate.get("direction") or "").upper()
             if not symbol or direction not in {"LONG", "SHORT"}:
                 continue
-            if REQUIRE_FRESH_SWEEP_AFTER_SL and not _fresh_sweep_after_last_sl(candidate, latest_sl):
+            if (
+                REQUIRE_FRESH_SWEEP_AFTER_SL
+                and str(candidate.get("strategy_name") or "").lower() == "liquidity_sweep_reversal"
+                and not _fresh_sweep_after_last_sl(candidate, latest_sl)
+            ):
                 rejects["post_sl_waiting_fresh_sweep"] = rejects.get("post_sl_waiting_fresh_sweep", 0) + 1
                 continue
             if not candidate.get("setup_confirmed_at"):
