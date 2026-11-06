@@ -84,6 +84,19 @@ def route_inventory(app: Any) -> tuple[set[tuple[str, str]], set[str]]:
                 verb = str(method).upper()
                 if verb in {"GET", "POST", "PUT", "PATCH", "DELETE", "TRACE"}:
                     http.add((verb, path))
+    else:
+        # Small test doubles and Starlette-only ASGI apps may not expose OpenAPI.
+        # Preserve support for their flat route lists without weakening the
+        # FastAPI path, which always uses the resolved OpenAPI contract above.
+        for route in getattr(app, "routes", ()):
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            if isinstance(path, str) and methods:
+                http.update(
+                    (str(method).upper(), path)
+                    for method in methods
+                    if str(method).upper() not in {"HEAD", "OPTIONS"}
+                )
 
     seen: set[int] = set()
 
