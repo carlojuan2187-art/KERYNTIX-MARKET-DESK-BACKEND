@@ -20,8 +20,17 @@ def test_results_endpoint_returns_closed_trade_snapshots():
         "tp1_at": now - timedelta(minutes=5), "closed_at": now, "evaluated_at": now,
         "duration_minutes": 10.0,
     }
-    app = create_app(InMemorySignalRepository([], [result]))
-    principal = Principal("user-42", {"sub": "user-42", "plan": "premium", "plan_end": (now + timedelta(days=1)).isoformat()}, False)
+    repository = InMemorySignalRepository([], [result])
+    repository.record_user_deliveries(
+        "user-42", ["signal-1"], delivered_at=now - timedelta(minutes=10),
+    )
+    app = create_app(repository)
+    principal = Principal("user-42", {
+        "sub": "user-42", "plan": "premium",
+        "created_at": now - timedelta(days=30),
+        "plan_updated_at": now - timedelta(days=30),
+        "plan_end": (now + timedelta(days=1)).isoformat(),
+    }, False)
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[require_analytical_access] = lambda: principal
     with TestClient(app) as client:

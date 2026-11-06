@@ -299,3 +299,31 @@ async def test_live_transition_replays_previous_tp1_before_current_market_snapsh
     assert saved["outcome"]["protective_stop_price"] == 100.5
     assert saved["outcome"]["tracked_until"] is not None
     assert saved["outcome"]["protection_armed_at"] is not None
+
+
+
+@pytest.mark.asyncio
+async def test_closed_signal_keeps_canonical_result_when_projection_write_fails():
+    now = utc_now()
+    signal = touched_signal(now)
+    candle_open = signal["outcome"]["tracked_until"] + timedelta(minutes=1)
+    market = FakeMarket([kline(candle_open, high=105.5, low=103.1, close=105.2)])
+
+    class ProjectionUnavailableRepository(InMemoryLifecycleRepository):
+        def save_result_snapshot(self, result):
+            raise RuntimeError("temporary projection outage")
+
+    repository = ProjectionUnavailableRepository([signal])
+    worker = SignalLifecycleWorker(
+        market, repository, InMemoryJsonCache(), clock=lambda: now,
+        outcome_check_seconds=5,
+    )
+
+    changed = await worker.track_open_trades_once(now=now, force=True)
+
+    saved = repository.snapshot_signals()[0]
+    assert changed == 1
+    assert saved["outcome"]["state"] == "CLOSED"
+    assert saved["outcome"]["result"] == "TP2"
+    assert saved["outcome"]["result_snapshot"]["signal_id"] == "open-uuid"
+    assert repository.list_results() == []

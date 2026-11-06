@@ -189,7 +189,7 @@ class UserAlertProcessor:
             direction_text = "alcanzó o superó" if condition == "above" else "alcanzó o cayó por debajo de"
             message = f"{symbol}: el precio actual ({current_text}) {direction_text} tu nivel de alerta ({target_text})."
             event_id = f"price-alert:{alert.get('id')}:trigger:{int(claimed.get('trigger_count', 1))}" if alert.get("repeat") else f"price-alert:{alert.get('id')}:triggered"
-            made, queued_telegram = await self._notify_user(
+            made, queued_telegram, _persisted = await self._notify_user(
                 user, event_id=event_id, kind="price", title=f"Alerta de precio · {symbol}", message=message,
                 symbol=symbol, metadata={"alert_id": alert.get("id"), "condition": condition,
                                          "target_price": target, "observed_price": price}, now=now,
@@ -249,7 +249,7 @@ class UserAlertProcessor:
                     for candidate in candidates:
                         if not wants_alert(user, candidate["kind"]):
                             continue
-                        made, queued = await self._notify_user(
+                        made, queued, _persisted = await self._notify_user(
                             user, event_id=candidate["event_id"], kind=candidate["kind"],
                             title=candidate["title"], message=candidate["message"], symbol=candidate.get("symbol"),
                             metadata=candidate.get("metadata") or {}, now=now,
@@ -364,14 +364,14 @@ class UserAlertProcessor:
                     return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
                 user_id = str(user.get("user_id") or "")
                 try:
-                    made, telegram_queued = await self._notify_user(
+                    made, telegram_queued, notification_persisted = await self._notify_user(
                         user, event_id=event_id, kind="signals", title=title, message=message,
                         symbol=symbol, metadata=metadata, now=current,
                     )
                 except Exception:
                     logger.exception("No se pudo encolar notificación de señal para usuario %s", user_id)
                     return {"notifications_created": 0, "telegram_queued": 0, "web_push_queued": 0}
-                if made and self.signal_repository is not None:
+                if notification_persisted and self.signal_repository is not None:
                     try:
                         await asyncio.to_thread(
                             self.signal_repository.record_user_deliveries,
@@ -380,8 +380,8 @@ class UserAlertProcessor:
                             delivered_at=current,
                         )
                     except Exception:
-                        # The durable notification has already been enqueued. Keep
-                        # delivery running and let the API feed provide a retry path.
+                        # Repair attribution for both new and previously-existing
+                        # idempotent notifications if the first ledger write failed.
                         logger.exception("No se pudo registrar la entrega personal de señal para %s", user_id)
                 return {
                     "notifications_created": int(made),
@@ -403,7 +403,7 @@ class UserAlertProcessor:
         return counts
 
     async def _notify_user(self, user: Mapping[str, Any], *, event_id: str, kind: str, title: str,
-                           message: str, symbol: str | None, metadata: dict[str, Any], now: datetime) -> tuple[bool, bool]:
+                           message: str, symbol: str | None, metadata: dict[str, Any], now: datetime) -> tuple[bool, bool, bool]:
         user_id = str(user.get("user_id") or "")
         title, message = localize_notification(title, message, user.get("language", "en"))
         prefs = alert_preferences(user)
@@ -419,7 +419,7 @@ class UserAlertProcessor:
             logger.warning("No se pudo comprobar las suscripciones push del usuario %s", user_id, exc_info=True)
             use_web_push = False
         if not user_id or not (use_in_app or use_telegram or use_web_push):
-            return False, False
+            return False, False, False
         doc = {
             "id": uuid.uuid4().hex, "user_id": user_id, "event_id": str(event_id), "kind": str(kind),
             "title": str(title)[:160], "message": str(message)[:2000], "symbol": symbol,
@@ -439,9 +439,11 @@ class UserAlertProcessor:
             saved, created = await asyncio.to_thread(self.features.create_notification, doc)
         except Exception:
             logger.exception("No se pudo persistir una notificación para el usuario %s", user_id)
-            return False, False
+            return False, False, False
         if not created:
-            return False, False
+            # An idempotent event already has a durable notification. Return that
+            # fact separately so a failed earlier delivery-ledger insert is repaired.
+            return False, False, True
         if use_in_app:
             try:
                 await self.cache.publish_json(NOTIFICATION_CHANNEL, {
@@ -454,7 +456,7 @@ class UserAlertProcessor:
                 logger.warning("La notificación quedó guardada pero no se pudo publicar en Redis", exc_info=True)
         # Second value now means queued, not sent. Actual delivery and retries are
         # handled by worker.telegram_notification_delivery.
-        return True, use_telegram
+        return True, use_telegram, True
 
     async def _filter_global_market_candidates(self, candidates: list[dict[str, Any]], now_epoch: float) -> list[dict[str, Any]]:
         """Port the bot's per-alert cooldown, escalation exception and hourly cap.

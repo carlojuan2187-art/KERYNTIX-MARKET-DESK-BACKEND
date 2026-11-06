@@ -259,17 +259,23 @@ class SignalLifecycleWorker:
         return combined
 
     async def _persist_outcome_step(self, signal: Mapping[str, Any], step: Mapping[str, Any]) -> tuple[bool, dict[str, Any]]:
-        """CAS-persist one state transition and publish its user-facing events."""
+        """CAS-persist the canonical outcome before projecting the result history.
+
+        The signal document and its embedded result snapshot are committed together.
+        The separate result collection is a recoverable read projection, never the
+        only copy of a closed operation.
+        """
         if not step.get("advanced"):
             return False, dict(signal)
         outcome_before = dict(signal.get("outcome") or {})
         new_outcome = dict(step.get("outcome") or {})
         closed = step.get("closed")
         levels = step.get("levels")
+        result_doc: dict[str, Any] | None = None
         if new_outcome.get("state") == STATE_CLOSED and closed is not None and levels is not None:
             result_doc = build_result_doc(dict(signal), levels, closed)
-            self.repository.save_result_if_absent(result_doc)
             new_outcome["r_real"] = closed.get("r_real")
+            new_outcome["result_snapshot"] = result_doc
         expected_tracked = (
             outcome_before.get("tracked_until") if "tracked_until" in outcome_before
             else utc_naive(signal.get("touched_at"))
@@ -280,6 +286,15 @@ class SignalLifecycleWorker:
         )
         if not updated:
             return False, dict(signal)
+
+        if result_doc is not None:
+            try:
+                self.repository.save_result_snapshot(result_doc)
+            except Exception:
+                logger.exception(
+                    "No se pudo materializar el resultado de %s; el snapshot canónico quedó guardado",
+                    _signal_id(signal),
+                )
 
         for event in step.get("events") or []:
             await self._publish({

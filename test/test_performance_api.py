@@ -56,8 +56,16 @@ def test_performance_route_returns_actual_snapshot_values():
         _result(1, "TP1", 1.25, now - timedelta(minutes=5)),
         _result(2, "SL", -1.0, now - timedelta(minutes=2)),
     ])
+    repo.record_user_deliveries(
+        "user-1", ["signal-1", "signal-2"], delivered_at=now - timedelta(days=1),
+    )
     app = create_app(repo)
-    principal = Principal("user-1", {"sub": "user-1", "plan": "premium", "plan_end": "2099-01-01T00:00:00Z"}, False)
+    principal = Principal("user-1", {
+        "sub": "user-1", "plan": "premium",
+        "created_at": now - timedelta(days=30),
+        "plan_updated_at": now - timedelta(days=30),
+        "plan_end": "2099-01-01T00:00:00Z",
+    }, False)
     app.dependency_overrides[current_principal] = lambda: principal
     app.dependency_overrides[require_analytical_access] = lambda: principal
     with TestClient(app) as client:

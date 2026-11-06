@@ -39,6 +39,7 @@ class LifecycleRepository(Protocol):
     def list_open(self, *, limit: int = 2000) -> list[Mapping[str, Any]]: ...
     def transition_pending(self, signal: Mapping[str, Any], event: Mapping[str, Any]) -> bool: ...
     def save_result_if_absent(self, result: Mapping[str, Any]) -> bool: ...
+    def save_result_snapshot(self, result: Mapping[str, Any]) -> bool: ...
     def compare_and_set_outcome(
         self, signal: Mapping[str, Any], previous_tracked_until: datetime | None,
         outcome: Mapping[str, Any], previous_live_price_at: datetime | None = None,
@@ -104,6 +105,18 @@ class InMemoryLifecycleRepository:
                 return False
             self._results[key] = dict(result)
             return True
+
+    def save_result_snapshot(self, result: Mapping[str, Any]) -> bool:
+        """Upsert the result projection from a result committed on its signal."""
+        key = str(result.get("signal_id") or result.get("id") or "")
+        if not key:
+            return False
+        document = dict(result)
+        document["signal_id"] = key
+        document.setdefault("id", key)
+        with self._lock:
+            self._results[key] = document
+        return True
 
     def compare_and_set_outcome(self, signal: Mapping[str, Any], previous_tracked_until: datetime | None,
                                 outcome: Mapping[str, Any], previous_live_price_at: datetime | None = None) -> bool:
@@ -244,6 +257,21 @@ class MongoLifecycleRepository:
                     return False
             except ImportError:
                 pass
+            self._raise_storage(exc)
+            return False
+
+    def save_result_snapshot(self, result: Mapping[str, Any]) -> bool:
+        """Upsert the materialized result only after the signal CLOSED CAS succeeds."""
+        document = dict(result)
+        key = str(document.get("signal_id") or document.get("id") or "")
+        if not key:
+            return False
+        document["signal_id"] = key
+        document.setdefault("id", key)
+        try:
+            self._results.update_one({"signal_id": key}, {"$set": document}, upsert=True)
+            return True
+        except Exception as exc:
             self._raise_storage(exc)
             return False
 

@@ -48,6 +48,54 @@ def _doc_created_at(document: Mapping[str, Any]) -> datetime | None:
     return _parse_datetime(value)
 
 
+def _closed_result_snapshot(signal: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Read or rebuild the immutable result snapshot from a canonically closed signal.
+
+    The signal document is the durable source of truth. The result collection is a
+    query-optimized projection; a failed projection write must never erase a trade.
+    """
+    outcome = signal.get("outcome")
+    if not isinstance(outcome, Mapping) or str(outcome.get("state") or "").upper() != "CLOSED":
+        return None
+
+    stored = outcome.get("result_snapshot")
+    if isinstance(stored, Mapping):
+        snapshot = dict(stored)
+        signal_id = str(snapshot.get("signal_id") or snapshot.get("id") or signal.get("id") or signal.get("signal_id") or signal.get("_id") or "")
+        if signal_id:
+            snapshot.setdefault("id", signal_id)
+            snapshot.setdefault("signal_id", signal_id)
+            return snapshot
+
+    result = str(outcome.get("result") or signal.get("operation_result") or "").upper()
+    closed_at = outcome.get("closed_at") or signal.get("closed_at")
+    raw_r = outcome.get("r_real", signal.get("r_result"))
+    if result not in {"TP1", "TP2", "SL"} or closed_at is None or raw_r is None:
+        return None
+    try:
+        from engine.outcome_logic import build_result_doc, trade_levels
+        levels = trade_levels(dict(signal))
+        if levels is None:
+            return None
+        closed = {
+            "result": result,
+            "outcome": "win" if result in {"TP1", "TP2"} else "loss",
+            "r_real": float(raw_r),
+            "ambiguous": bool(outcome.get("ambiguous", False)),
+            "closed_at": closed_at,
+            "tp1_at": outcome.get("tp1_at"),
+            "tp2_at": outcome.get("tp2_at"),
+            "exit_price": outcome.get("exit_price"),
+            "exit_trigger_price": outcome.get("exit_trigger_price"),
+            "via": outcome.get("exit_via"),
+            "calculation_version": outcome.get("calculation_version"),
+            "execution_model": outcome.get("execution_model"),
+        }
+        return build_result_doc(dict(signal), levels, closed)
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+
+
 class InMemorySignalRepository:
     """Non-persistent adapter for tests and explicit local development only."""
 
@@ -146,8 +194,26 @@ class InMemorySignalRepository:
 
     def list_results_by_signal_ids(self, signal_ids: Sequence[str]) -> list[Mapping[str, Any]]:
         wanted = {str(value) for value in signal_ids if str(value)}
+        if not wanted:
+            return []
         with self._lock:
-            return [dict(row) for row in self._results if str(row.get("signal_id") or row.get("id") or "") in wanted]
+            rows = {
+                str(row.get("signal_id") or row.get("id") or ""): dict(row)
+                for row in self._results
+                if str(row.get("signal_id") or row.get("id") or "") in wanted
+            }
+            signal_docs = [
+                dict(doc) for doc in self._documents
+                if str(doc.get("id") or doc.get("signal_id") or doc.get("_id") or "") in wanted
+            ]
+        # Prefer canonical closed-signal data over any stale result projection.
+        for signal in signal_docs:
+            snapshot = _closed_result_snapshot(signal)
+            if snapshot:
+                key = str(snapshot.get("signal_id") or snapshot.get("id") or "")
+                if key:
+                    rows[key] = snapshot
+        return list(rows.values())
 
     def health(self) -> dict[str, Any]:
         return {"status": "ok", "adapter": "memory", "persistent": False}
@@ -340,14 +406,34 @@ class MongoSignalRepository:
         if not ids:
             return []
         try:
-            rows = []
+            rows_by_id: dict[str, dict[str, Any]] = {}
             for raw in self._results_collection.find({"signal_id": {"$in": ids}}):
                 item = dict(raw)
                 item.pop("_id", None)
                 if not item.get("id"):
                     item["id"] = str(item.get("signal_id") or "")
-                rows.append(item)
-            return rows
+                key = str(item.get("signal_id") or item.get("id") or "")
+                if key:
+                    rows_by_id[key] = item
+            selectors = [
+                {"id": {"$in": ids}},
+                {"signal_id": {"$in": ids}},
+                {"_id": {"$in": ids}},
+            ]
+            try:
+                from bson import ObjectId
+                object_ids = [ObjectId(value) for value in ids if ObjectId.is_valid(value)]
+                if object_ids:
+                    selectors.append({"_id": {"$in": object_ids}})
+            except ImportError:
+                pass
+            for raw in self._collection.find({"$or": selectors}):
+                snapshot = _closed_result_snapshot(dict(raw))
+                if snapshot:
+                    key = str(snapshot.get("signal_id") or snapshot.get("id") or "")
+                    if key:
+                        rows_by_id[key] = snapshot
+            return list(rows_by_id.values())
         except Exception as exc:
             self._raise_storage_error(exc)
 
