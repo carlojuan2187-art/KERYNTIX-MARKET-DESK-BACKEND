@@ -73,6 +73,12 @@ def _latest_sl_by_symbol_direction(rows: list[Mapping[str, Any]]) -> dict[tuple[
     for row in rows:
         if str(row.get("result") or "").upper() != "SL":
             continue
+        # Do not let a Breakout Reset stop block a fresh LSR setup (or vice versa).
+        # Pre-dual-strategy result rows have no strategy name and are treated as LSR
+        # because the legacy KERYNTIX scanner only emitted the liquidity strategy.
+        strategy_name = str(row.get("strategy_name") or "").strip().lower()
+        if strategy_name and strategy_name != "liquidity_sweep_reversal":
+            continue
         symbol = str(row.get("symbol") or "").strip().upper()
         direction = str(row.get("direction") or "").strip().upper()
         closed_at = _utc_aware(row.get("closed_at"))
@@ -453,11 +459,9 @@ class SignalScanner:
                     task.cancel()
             await asyncio.gather(*worker_tasks, return_exceptions=True)
 
-        try:
-            sweeps_saved = self.sweep_store.save_observations(observations)
-        except Exception as exc:
-            sweeps_saved = 0
-            logger.warning("No se pudieron guardar barridos observados: %s", exc)
+        # The two HADES engines use their own closed-candle setup state; no
+        # legacy KERYNTIX sweep observations are written by this scanner.
+        sweeps_saved = 0
 
         candidates.sort(key=lambda pair: float(pair[1].get("score") or 0), reverse=True)
         latest_sl: dict[tuple[str, str], datetime] = {}
