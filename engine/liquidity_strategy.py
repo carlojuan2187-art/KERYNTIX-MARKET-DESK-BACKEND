@@ -46,7 +46,7 @@ LIQUIDITY_PIVOT_LEFT = max(1, int(os.getenv("LIQUIDITY_PIVOT_LEFT", "2")))
 LIQUIDITY_PIVOT_RIGHT = max(1, int(os.getenv("LIQUIDITY_PIVOT_RIGHT", "2")))
 SWEEP_SEARCH_BARS = max(2, int(os.getenv("LIQUIDITY_SWEEP_SEARCH_BARS", "4")))
 MIN_HISTORY_BARS = max(LIQUIDITY_LOOKBACK + 4, 36)
-SCORE_CALIBRATION_VERSION = "v4_6_plus_confirmation_quality_tp1_tp2"
+SCORE_CALIBRATION_VERSION = "v4_7_strict_sweep_directional_context"
 ENTRY_MODEL_NAME = "liquidity_sweep_reversal_predictive_pullback_v4"
 SETUP_STAGE_WAITING_PULLBACK = "confirmed_waiting_pullback"
 SEND_MODE_PENDING_ENTRY = breakout.SEND_MODE_PENDING_ENTRY
@@ -131,41 +131,20 @@ PREMIUM_PROFILE = {
 MTF_PREMIUM_PROFILE = dict(PLUS_PROFILE)
 MTF_PREMIUM_PROFILE["name"] = "premium"
 MTF_PREMIUM_PROFILE["filter_profile"] = "plus"
+# The live tier keeps the same entry model but requires materially stronger 1H
+# agreement than the base PLUS reference. This is a publication gate, not a
+# change to entry, stop, target, or R calculations.
+MTF_PREMIUM_PROFILE["htf_price_tolerance"] = breakout._env_float("LSR_MTF_HTF_PRICE_TOLERANCE", 0.006)
+MTF_PREMIUM_PROFILE["htf_trend_tolerance"] = breakout._env_float("LSR_MTF_HTF_TREND_TOLERANCE", 0.010)
+MTF_PREMIUM_PROFILE["htf_required_score"] = max(2, int(os.getenv("LSR_MTF_HTF_REQUIRED_SCORE", "3")))
+MTF_MIN_RAW_SCORE = max(0.0, breakout._env_float("LSR_MTF_RAW_SCORE_MIN", 82.0))
 PROFILES = [MTF_PREMIUM_PROFILE]
 
 
-LONG_DIRECTIONAL_TUNING = {
-    "free": {
-        "min_sweep_atr": 0.04,
-        "min_confirm_rel_volume": 0.06,
-        "min_body_ratio_confirmation": 0.04,
-        "min_close_position": 0.04,
-        "min_rr": 0.10,
-        "htf_required_score": 0,
-        "htf_price_tolerance_mul": 0.96,
-        "htf_trend_tolerance_mul": 0.96,
-    },
-    "plus": {
-        "min_sweep_atr": 0.05,
-        "min_confirm_rel_volume": 0.07,
-        "min_body_ratio_confirmation": 0.05,
-        "min_close_position": 0.05,
-        "min_rr": 0.12,
-        "htf_required_score": 1,
-        "htf_price_tolerance_mul": 0.92,
-        "htf_trend_tolerance_mul": 0.92,
-    },
-    "premium": {
-        "min_sweep_atr": 0.07,
-        "min_confirm_rel_volume": 0.09,
-        "min_body_ratio_confirmation": 0.05,
-        "min_close_position": 0.05,
-        "min_rr": 0.16,
-        "htf_required_score": 1,
-        "htf_price_tolerance_mul": 0.88,
-        "htf_trend_tolerance_mul": 0.88,
-    },
-}
+# Keep the same technical thresholds for LONG and SHORT. Direction is expressed
+# by mirrored market-context checks, not by making one side easier to publish.
+LONG_DIRECTIONAL_TUNING = {"free": {}, "plus": {}, "premium": {}}
+LONG_SCORE_FLOOR_BONUS = {"free": 0.0, "plus": 0.0, "premium": 0.0}
 
 PREMIUM_GLOBAL_TUNING = {
     "min_rel_volume": 0.03,
@@ -205,7 +184,7 @@ MAX_SWEEP_TO_MARKET_ATR = breakout._env_float("LSR_MAX_SWEEP_TO_MARKET_ATR", 1.4
 REQUIRE_EARLY_STRUCTURE_SHIFT = os.getenv("LSR_REQUIRE_EARLY_STRUCTURE_SHIFT", "true").strip().lower() not in {"0", "false", "no", "off"}
 # Control mínimo del primer objetivo. No fuerza un 1R rígido, para no destruir la
 # frecuencia de la estrategia, pero descarta geometrías claramente pobres.
-MIN_PUBLISH_TP1_RR = breakout._env_float("LSR_MIN_PUBLISH_TP1_RR", 0.80)
+MIN_PUBLISH_TP1_RR = breakout._env_float("LSR_MIN_PUBLISH_TP1_RR", 1.00)
 # Zona de entrada dinámica alrededor del pullback central.
 ENTRY_ZONE_HALF_ATR = breakout._env_float("LSR_ENTRY_ZONE_HALF_ATR", 0.10)
 ENTRY_ZONE_MIN_PCT = breakout._env_float("LSR_ENTRY_ZONE_MIN_PCT", 0.0006)
@@ -310,7 +289,7 @@ def _directional_min_raw_score(profile_name: str, direction: str) -> float:
 
 def _directional_context_ok(df: pd.DataFrame, direction: str, profile: Dict) -> bool:
     if df is None or df.empty or len(df) < 2:
-        return True
+        return False
 
     profile_name = _profile_name(profile)
     last = df.iloc[-1]
@@ -327,23 +306,22 @@ def _directional_context_ok(df: pd.DataFrame, direction: str, profile: Dict) -> 
     rel_volume = float(last.get("rel_volume") or 0.0)
 
     if str(direction).upper() == "SHORT":
-        if profile_name != "premium":
-            return True
         checks = [
-            close <= (ema20 * 1.002),
-            close <= (prev_close * 1.002) or low <= prev_low,
+            close <= (ema20 * (1.001 if profile_name == "free" else 1.0)),
+            ema20 <= (prev_ema20 * (1.001 if profile_name == "free" else 1.0005)),
+            close <= prev_close or low <= prev_low,
             rel_volume >= float(profile.get("min_confirm_rel_volume", 0.0)),
         ]
-        return sum(bool(flag) for flag in checks) >= 2
+    else:
+        checks = [
+            close >= (ema20 * (0.999 if profile_name == "free" else 1.0)),
+            ema20 >= (prev_ema20 * (0.999 if profile_name == "free" else 0.9995)),
+            close >= (prev_close * (0.999 if profile_name == "free" else 1.0)) or high >= prev_high,
+            rel_volume >= float(profile.get("min_confirm_rel_volume", 0.0)),
+        ]
 
-    checks = [
-        close >= (ema20 * (0.999 if profile_name == "free" else 1.0)),
-        ema20 >= (prev_ema20 * (0.999 if profile_name == "free" else 0.9995 if profile_name == "plus" else 1.0)),
-        close >= (prev_close * (0.999 if profile_name == "free" else 1.0)) or high >= prev_high,
-        rel_volume >= float(profile.get("min_confirm_rel_volume", 0.0)),
-    ]
-    required = 2 if profile_name == "free" else 3
-    return sum(bool(flag) for flag in checks) >= required
+    # Both sides must show at least two independent directional confirmations.
+    return sum(bool(flag) for flag in checks) >= 2
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     frame = df.copy()
@@ -422,15 +400,17 @@ def _min_raw_score_for_profile(profile_name: str) -> float:
 
 
 def _higher_timeframe_context_ok(df_1h: pd.DataFrame, direction: str, profile: Dict) -> bool:
-    if df_1h is None or df_1h.empty or len(df_1h) < 40:
-        return True
+    # A missing/incomplete higher timeframe is not evidence of alignment: fail
+    # closed rather than publishing on a context that could not be evaluated.
+    if df_1h is None or df_1h.empty or len(df_1h) < 60:
+        return False
     enriched = add_indicators(_closed_15m_frame(df_1h))
-    if enriched is None or enriched.empty:
-        return True
+    if enriched is None or enriched.empty or len(enriched) < 60:
+        return False
     last = enriched.iloc[-1]
     if not _indicators_ready(last):
-        return True
-    prev = enriched.iloc[-2] if len(enriched) >= 2 else last
+        return False
+    prev = enriched.iloc[-2]
     recent = enriched.tail(3)
 
     close = float(last["close"])
@@ -442,26 +422,21 @@ def _higher_timeframe_context_ok(df_1h: pd.DataFrame, direction: str, profile: D
     tolerance_trend = max(0.0, float(profile.get("htf_trend_tolerance", 0.0)))
     required_score = max(1, int(profile.get("htf_required_score", 1)))
 
-    if direction == "LONG":
-        price_support = close >= (ema20 * (1.0 - tolerance_price))
-        trend_support = ema20 >= (ema50 * (1.0 - tolerance_trend))
-        momentum_support = close >= prev_close or ema20 >= (prev_ema20 * 0.999)
-        reclaim_support = bool((recent["close"].astype(float) >= (recent["ema20"].astype(float) * (1.0 - tolerance_price))).any())
-        score = sum(bool(flag) for flag in (price_support, trend_support, momentum_support, reclaim_support))
-        if _profile_name(profile) == "premium" and not price_support and score < max(1, required_score):
-            return False
-        return score >= required_score
-
-    price_support = close <= (ema20 * (1.0 + tolerance_price))
-    trend_support = ema20 <= (ema50 * (1.0 + tolerance_trend))
-    momentum_support = close <= prev_close or ema20 <= (prev_ema20 * 1.001)
-    reclaim_support = bool((recent["close"].astype(float) <= (recent["ema20"].astype(float) * (1.0 + tolerance_price))).any())
-    score = sum(bool(flag) for flag in (price_support, trend_support, momentum_support, reclaim_support))
-    if _profile_name(profile) == "premium" and not price_support and score < max(1, required_score):
-        return False
-    return score >= required_score
-
-
+    if str(direction).upper() == "LONG":
+        checks = (
+            close >= (ema20 * (1.0 - tolerance_price)),
+            ema20 >= (ema50 * (1.0 - tolerance_trend)),
+            close >= prev_close or ema20 >= (prev_ema20 * 0.999),
+            bool((recent["close"].astype(float) >= (recent["ema20"].astype(float) * (1.0 - tolerance_price))).any()),
+        )
+    else:
+        checks = (
+            close <= (ema20 * (1.0 + tolerance_price)),
+            ema20 <= (ema50 * (1.0 + tolerance_trend)),
+            close <= prev_close or ema20 <= (prev_ema20 * 1.001),
+            bool((recent["close"].astype(float) <= (recent["ema20"].astype(float) * (1.0 + tolerance_price))).any()),
+        )
+    return sum(bool(flag) for flag in checks) >= required_score
 
 def _is_pivot_low(df: pd.DataFrame, idx: int, left: int, right: int) -> bool:
     low = float(df.iloc[idx]["low"])
@@ -492,12 +467,10 @@ def _select_liquidity_zone(df: pd.DataFrame, direction: str, profile: Dict) -> O
             pivot_rows.append({"price": float(frame.iloc[idx]["low"]), "index": absolute_idx})
         elif direction == "SHORT" and _is_pivot_high(frame.reset_index(drop=True), idx, LIQUIDITY_PIVOT_LEFT, LIQUIDITY_PIVOT_RIGHT):
             pivot_rows.append({"price": float(frame.iloc[idx]["high"]), "index": absolute_idx})
+    # Do not manufacture a liquidity level from a rolling 12-candle extreme.
+    # A candidate needs at least one confirmed pivot in the selected structure.
     if not pivot_rows:
-        if direction == "LONG":
-            fallback_price = float(frame["low"].tail(12).min())
-        else:
-            fallback_price = float(frame["high"].tail(12).max())
-        return {"price": fallback_price, "count": 1, "latest_index": int(frame.index[-1]), "tolerance": tolerance}
+        return None
 
     pivot_rows.sort(key=lambda item: item["price"])
     clusters: List[Dict] = []
@@ -595,42 +568,40 @@ def _find_recent_sweep(df: pd.DataFrame, direction: str, level: float, profile: 
         return None
     atr_now = float(df.iloc[-1]["atr"])
     min_sweep_distance = atr_now * float(profile["min_sweep_atr"])
-    if direction == "LONG":
+
+    if str(direction).upper() == "LONG":
         low_price = float(tail["low"].min())
         idx = int(tail["low"].idxmin())
         candle = df.loc[idx]
         wick_ratio = float(candle.get("lower_wick") or 0.0)
-        swept_hard = low_price < (level - min_sweep_distance)
-        swept_soft = low_price <= (level + (atr_now * 0.025)) and wick_ratio >= 0.22
-        if not (swept_hard or swept_soft):
-            return None
-        if float(candle["close"]) <= (level - atr_now * 0.035):
+        # A sweep must trade THROUGH the low pool by the configured distance
+        # and close back above it. A nearby wick that never takes liquidity is
+        # only a test of the level, not a valid sweep.
+        penetration = level - low_price
+        if penetration < min_sweep_distance or float(candle["close"]) <= level:
             return None
         return {
             "index": idx,
             "extreme_price": breakout._round_price_dynamic(low_price),
-            "sweep_distance_atr": round((level - low_price) / max(atr_now, 1e-9), 4),
+            "sweep_distance_atr": round(penetration / max(atr_now, 1e-9), 4),
             "wick_ratio": round(wick_ratio, 4),
-            "sweep_mode": "hard" if swept_hard else "soft",
+            "sweep_mode": "hard",
         }
+
     high_price = float(tail["high"].max())
     idx = int(tail["high"].idxmax())
     candle = df.loc[idx]
     wick_ratio = float(candle.get("upper_wick") or 0.0)
-    swept_hard = high_price > (level + min_sweep_distance)
-    swept_soft = high_price >= (level - (atr_now * 0.025)) and wick_ratio >= 0.22
-    if not (swept_hard or swept_soft):
-        return None
-    if float(candle["close"]) >= (level + atr_now * 0.035):
+    penetration = high_price - level
+    if penetration < min_sweep_distance or float(candle["close"]) >= level:
         return None
     return {
         "index": idx,
         "extreme_price": breakout._round_price_dynamic(high_price),
-        "sweep_distance_atr": round((high_price - level) / max(atr_now, 1e-9), 4),
+        "sweep_distance_atr": round(penetration / max(atr_now, 1e-9), 4),
         "wick_ratio": round(wick_ratio, 4),
-        "sweep_mode": "hard" if swept_hard else "soft",
+        "sweep_mode": "hard",
     }
-
 
 
 def _safe_rr(entry_price: float, stop_loss: float, target_price: float) -> float:
@@ -835,12 +806,37 @@ def _component(name: str, points: float, value: float, passed: bool) -> Dict:
 
 
 
-def _score_components(last: pd.Series, direction: str, zone: Dict, sweep: Dict, barrier_rr: float, profile: Dict) -> List[Dict]:
+def _score_components(
+    last: pd.Series,
+    direction: str,
+    zone: Dict,
+    sweep: Dict,
+    barrier_rr: float,
+    profile: Dict,
+    *,
+    trend_reference: Optional[pd.Series] = None,
+) -> List[Dict]:
     rel_volume = float(last.get("rel_volume") or 0.0)
     body_ratio = float(last.get("body_ratio") or 0.0)
     close_position = float(last.get("close_position") or 0.0)
     confirmation_volume_ok = rel_volume >= float(profile["min_confirm_rel_volume"])
     close_pos_value = close_position if direction == "LONG" else (1.0 - close_position)
+
+    # Award EMA points only when the 15m structure confirms direction. Five
+    # points for price on the correct side of EMA20; five more for the EMA20/50
+    # stack. The former unconditional ten points hid weak trend structure.
+    ema_points = 0.0
+    if trend_reference is not None:
+        reference_close = float(trend_reference.get("close") or 0.0)
+        reference_ema20 = float(trend_reference.get("ema20") or 0.0)
+        reference_ema50 = float(trend_reference.get("ema50") or 0.0)
+        if reference_ema20 > 0 and reference_ema50 > 0:
+            if direction == "LONG":
+                ema_points += 5.0 if reference_close >= reference_ema20 else 0.0
+                ema_points += 5.0 if reference_ema20 >= reference_ema50 else 0.0
+            else:
+                ema_points += 5.0 if reference_close <= reference_ema20 else 0.0
+                ema_points += 5.0 if reference_ema20 <= reference_ema50 else 0.0
 
     return [
         _component("liquidity_zone", 18.0, float(zone.get("count") or 0.0), float(zone.get("count") or 0.0) >= 1.0),
@@ -848,7 +844,7 @@ def _score_components(last: pd.Series, direction: str, zone: Dict, sweep: Dict, 
         _component("recovery_close", 16.0, body_ratio, body_ratio >= float(profile["min_body_ratio_recovery"])),
         _component("confirmation_volume", 14.0, rel_volume, confirmation_volume_ok),
         _component("close_position", 12.0, close_pos_value, close_pos_value >= float(profile["min_close_position"])),
-        _component("ema_reclaim", 10.0, float(last["close"]), True),
+        _component("ema_reclaim", ema_points, ema_points / 5.0, ema_points > 0.0),
         _component("barrier_room_rr", 12.0, barrier_rr, barrier_rr >= float(profile["min_rr"])),
     ]
 
@@ -950,6 +946,9 @@ def _evaluate_direction(
         return None
     stop_loss = float(trade["stop_loss"])
     take_profits = list(trade["take_profits"])
+    if _tp1_rr(entry_price, stop_loss, take_profits) < MIN_PUBLISH_TP1_RR:
+        reject("liquidity_tp1_rr_too_low")
+        return None
 
     # "Espacio" disponible = R:R hasta el último objetivo estructural.
     barrier_rr = _safe_rr(entry_price, stop_loss, take_profits[-1])
@@ -957,7 +956,7 @@ def _evaluate_direction(
         reject("liquidity_barrier_room")
         return None
 
-    components = _score_components(last, direction, zone, sweep, barrier_rr, tuned_profile)
+    components = _score_components(last, direction, zone, sweep, barrier_rr, tuned_profile, trend_reference=last)
     raw_score = _sum_components(components)
     if raw_score < _directional_min_raw_score(_profile_name(tuned_profile), direction):
         reject("liquidity_score_floor")
@@ -1091,14 +1090,12 @@ def _restore_observed_sweep(df_5m: pd.DataFrame, direction: str, level: float,
             # proximity of the levels alone cannot justify a trade.
             distance = atr * float(profile["min_sweep_atr"])
             if direction == "LONG":
-                hard = extreme < level - distance
-                soft = extreme <= level + atr * 0.025 and float(candle.get("lower_wick") or 0) >= 0.22
-                recovered = float(candle["close"]) > level - atr * 0.035
+                penetration = level - extreme
+                recovered = float(candle["close"]) > level
             else:
-                hard = extreme > level + distance
-                soft = extreme >= level - atr * 0.025 and float(candle.get("upper_wick") or 0) >= 0.22
-                recovered = float(candle["close"]) < level + atr * 0.035
-            if not ((hard or soft) and recovered):
+                penetration = extreme - level
+                recovered = float(candle["close"]) < level
+            if penetration < distance or not recovered:
                 return None
         if len(df_5m) - 1 - pos > MAX_BARS_AFTER_SWEEP:
             return None
@@ -1179,8 +1176,8 @@ def _evaluate_direction_5m_execution(
         return None
 
     bars_after_sweep = _bars_since_index(df_5m, sweep.get("index"))
-    if bars_after_sweep is None or bars_after_sweep > MAX_BARS_AFTER_SWEEP:
-        reject("execution_confirmation_too_late")
+    if bars_after_sweep is None or bars_after_sweep < 1 or bars_after_sweep > MAX_BARS_AFTER_SWEEP:
+        reject("execution_confirmation_window_invalid")
         return None
     if REQUIRE_EARLY_STRUCTURE_SHIFT and not _early_structure_shift_ok(df_5m, direction, sweep.get("index")):
         reject("execution_structure_shift_missing")
@@ -1275,9 +1272,16 @@ def _evaluate_direction_5m_execution(
         reject("liquidity_barrier_room")
         return None
 
-    components = _score_components(trigger_last, direction, zone, sweep, barrier_rr, tuned_profile)
+    components = _score_components(
+        trigger_last, direction, zone, sweep, barrier_rr, tuned_profile,
+        trend_reference=structure_last,
+    )
     raw_score = _sum_components(components)
-    if raw_score < _directional_min_raw_score(_profile_name(tuned_profile), direction):
+    minimum_score = max(
+        _directional_min_raw_score(_profile_name(tuned_profile), direction),
+        MTF_MIN_RAW_SCORE,
+    )
+    if raw_score < minimum_score:
         reject("liquidity_score_floor")
         return None
 
