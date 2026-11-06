@@ -154,9 +154,10 @@ def test_websocket_ticket_is_short_lived_and_single_use(monkeypatch):
 
 
 def test_compatibility_routes_are_registered_and_admin_aliases_are_protected(monkeypatch):
+    from scripts.release_preflight import route_inventory
+
     app, _, _, _, _, _ = build_app(monkeypatch)
-    registered = {(method, route.path) for route in app.routes if hasattr(route, "methods")
-                  for method in (route.methods or set())}
+    registered, websocket_routes = route_inventory(app)
     expected = {
         ("GET", "/symbols"), ("GET", "/symbols/{symbol}"),
         ("POST", "/events/ticket"), ("POST", "/payments/start"),
@@ -168,7 +169,7 @@ def test_compatibility_routes_are_registered_and_admin_aliases_are_protected(mon
         ("PATCH", "/admin/users/{user_id}/unban"),
     }
     assert expected <= registered
-
+    assert "/ws/events" in websocket_routes
 
 def _admin_principal(app, user):
     from api.security import Principal
