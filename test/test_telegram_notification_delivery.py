@@ -190,13 +190,13 @@ def test_alert_dispatcher_persists_telegram_outbox_without_inline_send():
     processor = UserAlertProcessor(auth, features, InMemoryJsonCache(), telegram)
     now = datetime.now(UTC)
 
-    made, queued = asyncio.run(processor._notify_user(
+    made, queued, persisted = asyncio.run(processor._notify_user(
         auth.get_user_by_id("telegram-user"), event_id="durable-alert-1", kind="price",
         title="Precio de BTC", message="Se alcanzó tu nivel", symbol="BTCUSDT",
         metadata={"target": 100}, now=now,
     ))
 
-    assert made is True and queued is True
+    assert made is True and queued is True and persisted is True
     assert telegram.sent == []  # The alert worker only persists; a separate worker delivers.
     stored = features.list_notifications("telegram-user")[0]
     assert stored["telegram_delivery"]["status"] == "pending"
