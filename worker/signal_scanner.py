@@ -116,6 +116,23 @@ def _observation_key(symbol: str, profile: str, direction: str) -> str:
     return f"{symbol}:{profile}:{direction}"
 
 
+def _merge_counter_tree(target: dict[str, Any], source: Mapping[str, Any]) -> None:
+    """Merge nested strategy/router counters without coercing dictionaries to ints."""
+    for key, value in source.items():
+        name = str(key)
+        if isinstance(value, Mapping):
+            child = target.setdefault(name, {})
+            if not isinstance(child, dict):
+                child = {}
+                target[name] = child
+            _merge_counter_tree(child, value)
+        else:
+            try:
+                target[name] = int(target.get(name, 0)) + int(value or 0)
+            except (TypeError, ValueError):
+                continue
+
+
 def _make_observation(
     symbol: str, profile: str, direction: str, sweep: Mapping[str, Any], level: float, candle_time: Any,
     *, now: datetime,
@@ -350,6 +367,7 @@ class SignalScanner:
         candidates: list[tuple[str, dict[str, Any]]] = []
         symbol_errors = 0
         rejects: dict[str, int] = {}
+        strategy_diagnostics: dict[str, Any] = {}
 
         async def analyze(symbol: str) -> tuple[str, dict[str, dict[str, Any]], dict[str, int], list[dict[str, Any]]]:
             async with semaphore:
@@ -357,8 +375,9 @@ class SignalScanner:
                 found_observations: list[dict[str, Any]] = []
                 debug_counts: dict[str, int] = {}
                 one_hour, fifteen, five = await asyncio.gather(
-                    self._throttled(self.market_client.fetch_klines, symbol, "1h", 200),
-                    self._throttled(self.market_client.fetch_klines, symbol, "15m", 200),
+                    # HADES Breakout Reset applies its upper-timeframe filters at 220 bars.
+                    self._throttled(self.market_client.fetch_klines, symbol, "1h", 240),
+                    self._throttled(self.market_client.fetch_klines, symbol, "15m", 240),
                     # Breakout Reset PLUS requires 260 closed 5M bars for EMA200 warmup.
                     self._throttled(self.market_client.fetch_klines, symbol, "5m", 320),
                 )
@@ -404,7 +423,13 @@ class SignalScanner:
                     symbol, results, debug, discovered = await analyze(symbol)
                     observations.extend(discovered)
                     for reason, count in debug.items():
-                        rejects[reason] = rejects.get(reason, 0) + int(count)
+                        if str(reason).startswith("__") and isinstance(count, Mapping):
+                            _merge_counter_tree(strategy_diagnostics.setdefault(str(reason), {}), count)
+                            continue
+                        try:
+                            rejects[reason] = rejects.get(reason, 0) + int(count)
+                        except (TypeError, ValueError):
+                            continue
                     for visibility, payload in results.items():
                         if payload:
                             candidates.append((visibility, {**payload, "symbol": symbol}))
@@ -517,6 +542,7 @@ class SignalScanner:
             "sweeps_saved": sweeps_saved,
             "duration_seconds": round(time.monotonic() - started, 3),
             "top_rejections": dict(sorted(rejects.items(), key=lambda pair: pair[1], reverse=True)[:12]),
+            "strategy_diagnostics": strategy_diagnostics,
         }
         await self._write_status({**result, "last_scan_at": now.isoformat()})
         return result
