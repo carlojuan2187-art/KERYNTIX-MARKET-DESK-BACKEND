@@ -64,23 +64,67 @@ PRODUCTION_IMPORTS = ("cryptography", "pywebpush")
 
 
 def route_inventory(app: Any) -> tuple[set[tuple[str, str]], set[str]]:
+    """Return effective HTTP paths and WebSocket paths for the app.
+
+    FastAPI 0.137+ keeps included routers as a lazy route tree instead of
+    flattening them into app.routes. OpenAPI resolves that tree into the
+    effective HTTP contract, while WebSocket routes (not represented in
+    OpenAPI) are discovered by walking the included routers recursively.
+    """
     http: set[tuple[str, str]] = set()
     websockets: set[str] = set()
-    for route in getattr(app, "routes", ()):
-        path = getattr(route, "path", None)
-        if not isinstance(path, str):
-            continue
-        methods = getattr(route, "methods", None)
-        if methods:
-            http.update((str(method).upper(), path) for method in methods if method not in {"HEAD", "OPTIONS"})
-        elif "websocket" in type(route).__name__.lower() or hasattr(route, "endpoint") and "websocket" in str(getattr(route, "name", "")).lower():
-            websockets.add(path)
-        # Starlette's WebSocketRoute has no methods and may not have a websocket
-        # in its name; identify it by its class name as well.
-        elif type(route).__name__ == "APIWebSocketRoute":
-            websockets.add(path)
-    return http, websockets
 
+    openapi = getattr(app, "openapi", None)
+    if callable(openapi):
+        schema = openapi()
+        for path, operations in (schema.get("paths") or {}).items():
+            if not isinstance(path, str) or not isinstance(operations, dict):
+                continue
+            for method in operations:
+                verb = str(method).upper()
+                if verb in {"GET", "POST", "PUT", "PATCH", "DELETE", "TRACE"}:
+                    http.add((verb, path))
+    else:
+        # Small test doubles and Starlette-only ASGI apps may not expose OpenAPI.
+        # Preserve support for their flat route lists without weakening the
+        # FastAPI path, which always uses the resolved OpenAPI contract above.
+        for route in getattr(app, "routes", ()):
+            path = getattr(route, "path", None)
+            methods = getattr(route, "methods", None)
+            if isinstance(path, str) and methods:
+                http.update(
+                    (str(method).upper(), path)
+                    for method in methods
+                    if str(method).upper() not in {"HEAD", "OPTIONS"}
+                )
+
+    seen: set[int] = set()
+
+    def collect_websockets(routes: Iterable[Any]) -> None:
+        for route in routes:
+            marker = id(route)
+            if marker in seen:
+                continue
+            seen.add(marker)
+
+            route_type = type(route).__name__.lower()
+            path = getattr(route, "path", None)
+            if isinstance(path, str) and (
+                route_type in {"apiwebsocketroute", "websocketroute"}
+                or ("websocket" in route_type and hasattr(route, "endpoint"))
+            ):
+                websockets.add(path)
+
+            # FastAPI 0.137+ represents included routers as _IncludedRouter
+            # nodes that reference their source APIRouter. Older versions expose
+            # child routes directly in app.routes.
+            original_router = getattr(route, "original_router", None)
+            nested_routes = getattr(original_router, "routes", None)
+            if nested_routes is not None:
+                collect_websockets(nested_routes)
+
+    collect_websockets(getattr(app, "routes", ()))
+    return http, websockets
 
 def _compile_source_tree(root: Path) -> list[str]:
     issues: list[str] = []

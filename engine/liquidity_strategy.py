@@ -154,11 +154,6 @@ PREMIUM_GLOBAL_TUNING = {
     "min_rr": 0.05,
 }
 
-LONG_SCORE_FLOOR_BONUS = {
-    "free": 1.0,
-    "plus": 2.0,
-    "premium": 4.0,
-}
 PREMIUM_SCORE_FLOOR_BONUS = 2.0
 
 

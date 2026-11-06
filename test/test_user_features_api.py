@@ -218,6 +218,8 @@ class FakeKlineRest:
 
 
 def test_watchlist_uses_bot_multitimeframe_analysis_and_shared_cache():
+    import time
+
     app, _auth, _features, _cache, _principal = setup()
     rest = FakeKlineRest()
     market = app.state.watchlist_service.market
@@ -225,14 +227,30 @@ def test_watchlist_uses_bot_multitimeframe_analysis_and_shared_cache():
     with TestClient(app) as client:
         added = client.post("/watchlist", json={"symbol": "btc"})
         assert added.status_code == 201, added.text
-        first = added.json()["items"][0]
-        assert set(first["analyses"]) == {"15m", "1h", "4h"}
+        initial = added.json()["items"][0]
+        assert set(initial["analyses"]) == {"15m", "1h", "4h"}
+        # New symbols respond immediately while the 3 timeframe analyses warm in
+        # the background. Poll the API until that shared cache has been populated.
+        assert added.json()["analysis_status"] in {"collecting", "ready"}
+        deadline = time.monotonic() + 3.0
+        ready = None
+        while time.monotonic() < deadline:
+            response = client.get("/watchlist")
+            assert response.status_code == 200, response.text
+            payload = response.json()
+            if payload["analysis_status"] == "ready" and payload["items"][0]["analyses"]["1h"] is not None:
+                ready = payload
+                break
+            time.sleep(0.05)
+
+        assert ready is not None, "watchlist analysis did not finish its background refresh"
+        first = ready["items"][0]
         assert first["analyses"]["1h"] is not None
         assert first["score_detail"] is not None
         assert first["score"] == first["score_detail"]["score"]
         assert first["trend"]["1H"] is not None
-        # The first call downloads one series per timeframe. A later visitor/request
-        # consumes the shared Redis-equivalent cache instead of repeating all 3 calls.
+        # After the first refresh, requests consume shared cache rather than
+        # downloading the 3 timeframe series again.
         listed = client.get("/watchlist")
         assert listed.status_code == 200
         assert len(rest.calls) == 3

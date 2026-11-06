@@ -137,6 +137,8 @@ def test_contract_payment_aliases_use_the_existing_payment_service(monkeypatch):
 
 
 def test_websocket_ticket_is_short_lived_and_single_use(monkeypatch):
+    import time
+
     app, _cache, _auth, _, user, _ = build_app(monkeypatch)
     with TestClient(app) as client:
         ticket_response = client.post("/events/ticket")
@@ -144,19 +146,26 @@ def test_websocket_ticket_is_short_lived_and_single_use(monkeypatch):
         ticket = ticket_response.json()["ticket"]
         assert ticket_response.json()["expires_in"] == 60
         assert ticket_response.json()["websocket_path"] == "/ws/events"
-        with client.websocket_connect(f"/ws/events?ticket={ticket}"):
-            # Successful handshake proves the API consumed the ticket and validated
-            # the persisted session; the context closes the connection cleanly.
-            pass
+        with client.websocket_connect(f"/ws/events?ticket={ticket}") as connected:
+            # Close the client side and let the ASGI route finish its disconnect
+            # cleanup before TestClient tears down its worker portal.
+            connected.close()
+            hub = getattr(app.state, "event_hub", None)
+            deadline = time.monotonic() + 2.0
+            while hub is not None and hub.listener_count and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert hub is not None
+            assert hub.listener_count == 0
+
         with client.websocket_connect(f"/ws/events?ticket={ticket}") as reused:
             with pytest.raises(WebSocketDisconnect):
                 reused.receive_json()
 
-
 def test_compatibility_routes_are_registered_and_admin_aliases_are_protected(monkeypatch):
+    from scripts.release_preflight import route_inventory
+
     app, _, _, _, _, _ = build_app(monkeypatch)
-    registered = {(method, route.path) for route in app.routes if hasattr(route, "methods")
-                  for method in (route.methods or set())}
+    registered, websocket_routes = route_inventory(app)
     expected = {
         ("GET", "/symbols"), ("GET", "/symbols/{symbol}"),
         ("POST", "/events/ticket"), ("POST", "/payments/start"),
@@ -168,7 +177,7 @@ def test_compatibility_routes_are_registered_and_admin_aliases_are_protected(mon
         ("PATCH", "/admin/users/{user_id}/unban"),
     }
     assert expected <= registered
-
+    assert "/ws/events" in websocket_routes
 
 def _admin_principal(app, user):
     from api.security import Principal

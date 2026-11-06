@@ -63,6 +63,19 @@ def _candidate(now: datetime) -> dict[str, Any]:
     }
 
 
+
+def _patch_scanner_candidate(monkeypatch, candidate: dict[str, Any]) -> None:
+    """Patch the current router/adapter seam used by the dual-strategy scanner."""
+    def fake_route(**_kwargs):
+        return {**candidate, "strategy_name": candidate.get("strategy_name") or "liquidity_sweep_reversal"}
+
+    def fake_prepare(routed, **_kwargs):
+        return dict(routed)
+
+    monkeypatch.setattr(signal_scanner, "route_candidate", fake_route)
+    monkeypatch.setattr(signal_scanner, "prepare_candidate", fake_prepare)
+
+
 def _kline(ts: datetime, close: float = 100.0) -> list[Any]:
     ms = int(ts.timestamp() * 1000)
     close_ms = ms + 59_999
@@ -147,9 +160,7 @@ def test_signal_document_preserves_strategy_metadata_for_api():
 async def test_scan_cycle_persists_one_real_candidate_and_skips_low_volume_symbols(monkeypatch):
     now = datetime.now(timezone.utc)
     candidate = _candidate(now)
-    def fake_strategy(*args, **kwargs):
-        return {"premium": dict(candidate)}
-    monkeypatch.setattr(signal_scanner, "mtf_strategies_by_plan", fake_strategy)
+    _patch_scanner_candidate(monkeypatch, candidate)
 
     repository = InMemorySignalRepository()
     cache = InMemoryJsonCache()
@@ -177,7 +188,7 @@ async def test_scan_cycle_persists_one_real_candidate_and_skips_low_volume_symbo
 async def test_scan_cycle_does_not_create_duplicate_pending_signal(monkeypatch):
     now = datetime.now(timezone.utc)
     candidate = _candidate(now)
-    monkeypatch.setattr(signal_scanner, "mtf_strategies_by_plan", lambda *args, **kwargs: {"premium": dict(candidate)})
+    _patch_scanner_candidate(monkeypatch, candidate)
     repository = InMemorySignalRepository()
     scanner = SignalScanner(FakeMarketClient(now), repository, InMemorySweepStore(), min_quote_volume=50_000_000, clock=lambda: now)
     first = await scanner.scan_once()
@@ -217,7 +228,7 @@ async def test_scan_uses_a_fixed_worker_pool_for_large_symbol_lists(monkeypatch)
         analyzed += 1
         return {}
 
-    monkeypatch.setattr(signal_scanner, "mtf_strategies_by_plan", no_signal_strategy)
+    monkeypatch.setattr(signal_scanner, "route_candidate", no_signal_strategy)
     scanner = SignalScanner(
         ManySymbolsMarket(now), InMemorySignalRepository(), InMemorySweepStore(),
         min_quote_volume=1, concurrency=3, request_delay_seconds=0.0, clock=lambda: now,
