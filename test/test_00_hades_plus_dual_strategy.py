@@ -6,6 +6,7 @@ import inspect
 import pandas as pd
 
 from engine import breakout_reset_strategy as breakout
+from engine.outcome_logic import build_result_doc
 from engine import liquidity_sweep_strategy as liquidity
 from engine.dual_strategy_adapter import prepare_candidate
 from engine.prepublication import validate_prepublication_setup
@@ -105,3 +106,34 @@ def test_adapter_rejects_invalid_trade_geometry():
         "entry_price": 100, "stop_loss": 101, "take_profits": [102],
     }
     assert prepare_candidate(candidate, df_1h=df, df_15m=df, df_5m=df) is None
+
+
+def test_closed_results_retain_strategy_and_regime_attribution():
+    created = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    closed = datetime(2026, 11, 6, 12, 15, tzinfo=timezone.utc)
+    snapshot = build_result_doc(
+        {
+            "id": "signal-1", "symbol": "BTCUSDT", "direction": "LONG",
+            "visibility": "premium", "entry_price": 100.0,
+            "entry_zone": {"low": 99.9, "high": 100.1}, "stop_loss": 99.0,
+            "take_profits": [101.0, 102.0], "created_at": created,
+            "strategy_name": "breakout_reset", "strategy_version": "v15",
+            "router_version": "v3", "regime_state": "continuation_clean",
+            "regime_bias": "up", "regime_reason": "market_regime_continuation_clean",
+            "regime_strategy_selected": "breakout_reset",
+            "router_primary_strategy": "breakout_reset", "router_fallback_used": False,
+        },
+        {
+            "direction": "LONG", "fill": 100.0, "entry_reference": "entry_price",
+            "sl": 99.0, "tp1": 101.0, "tp2": 102.0, "risk": 1.0,
+            "r_tp1": 1.0, "r_tp2": 2.0,
+        },
+        {
+            "result": "TP1", "outcome": "win", "r_real": 1.0, "ambiguous": False,
+            "closed_at": closed, "tp1_at": closed, "tp2_at": None,
+            "via": "TP1", "calculation_version": "2.0", "execution_model": "test",
+        },
+    )
+    assert snapshot["strategy_name"] == "breakout_reset"
+    assert snapshot["regime_state"] == "continuation_clean"
+    assert snapshot["router_fallback_used"] is False
