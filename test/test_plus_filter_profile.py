@@ -1,6 +1,7 @@
 import pytest
 
 from engine.liquidity_strategy import (
+    MTF_MIN_RAW_SCORE,
     MTF_PREMIUM_PROFILE,
     PLUS_PROFILE,
     PLUS_RAW_SCORE_MIN,
@@ -14,12 +15,12 @@ from engine.liquidity_strategy import (
 def test_active_keryntix_signal_uses_reference_plus_filter_profile():
     assert len(PROFILES) == 1
     active = PROFILES[0]
-    assert active["name"] == "premium"  # delivery tier remains unchanged
-    assert _profile_name(active) == "plus"  # filter calibration is PLUS
+    assert active["name"] == "premium"
+    assert _profile_name(active) == "plus"
     assert active["filter_profile"] == "plus"
 
 
-def test_plus_base_filter_values_include_moderate_confirmation_tightening():
+def test_plus_reference_values_are_preserved_and_live_tier_is_stricter():
     expected = {
         "atr_pct_min": 0.0015,
         "atr_pct_max": 0.0240,
@@ -37,30 +38,31 @@ def test_plus_base_filter_values_include_moderate_confirmation_tightening():
     }
     for key, value in expected.items():
         assert PLUS_PROFILE[key] == value
-        assert MTF_PREMIUM_PROFILE[key] == value
+
+    assert MTF_PREMIUM_PROFILE["atr_pct_min"] == expected["atr_pct_min"]
+    assert MTF_PREMIUM_PROFILE["atr_pct_max"] == expected["atr_pct_max"]
+    assert MTF_PREMIUM_PROFILE["liquidity_tolerance_atr"] == expected["liquidity_tolerance_atr"]
+    assert MTF_PREMIUM_PROFILE["min_sweep_atr"] == expected["min_sweep_atr"]
+    assert MTF_PREMIUM_PROFILE["min_confirm_rel_volume"] == expected["min_confirm_rel_volume"]
+    assert MTF_PREMIUM_PROFILE["htf_price_tolerance"] == 0.006
+    assert MTF_PREMIUM_PROFILE["htf_trend_tolerance"] == 0.010
+    assert MTF_PREMIUM_PROFILE["htf_required_score"] == 3
     assert PLUS_RAW_SCORE_MIN == 76.0
+    assert MTF_MIN_RAW_SCORE == 82.0
 
 
-def test_plus_long_adjustments_match_reference_strategy_effective_values():
-    long = _directional_profile(MTF_PREMIUM_PROFILE, "LONG")
-    short = _directional_profile(MTF_PREMIUM_PROFILE, "SHORT")
+def test_directional_thresholds_are_mirrored_for_long_and_short():
+    long_profile = _directional_profile(MTF_PREMIUM_PROFILE, "LONG")
+    short_profile = _directional_profile(MTF_PREMIUM_PROFILE, "SHORT")
 
-    assert long["min_rel_volume"] == pytest.approx(0.76)
-    assert short["min_rel_volume"] == pytest.approx(0.76)
-    assert long["min_sweep_atr"] == pytest.approx(0.15)
-    assert long["min_confirm_rel_volume"] == pytest.approx(0.91)
-    assert long["min_body_ratio_confirmation"] == pytest.approx(0.20)
-    assert long["min_close_position"] == pytest.approx(0.60)
-    assert long["min_rr"] == pytest.approx(1.02)
-    assert long["htf_required_score"] == 2
-    assert round(long["htf_price_tolerance"], 6) == 0.01012
-    assert round(long["htf_trend_tolerance"], 6) == 0.0184
-    assert _directional_min_raw_score("plus", "LONG") == 78.0
-
-    assert short["min_sweep_atr"] == pytest.approx(0.10)
-    assert short["min_confirm_rel_volume"] == pytest.approx(0.84)
-    assert short["min_body_ratio_confirmation"] == pytest.approx(0.15)
-    assert short["min_close_position"] == pytest.approx(0.55)
-    assert short["min_rr"] == pytest.approx(0.90)
-    assert short["htf_required_score"] == 1
+    assert long_profile == short_profile
+    assert long_profile["min_sweep_atr"] == pytest.approx(0.10)
+    assert long_profile["min_confirm_rel_volume"] == pytest.approx(0.84)
+    assert long_profile["min_body_ratio_confirmation"] == pytest.approx(0.15)
+    assert long_profile["min_close_position"] == pytest.approx(0.55)
+    assert long_profile["min_rr"] == pytest.approx(0.90)
+    assert long_profile["htf_required_score"] == 3
+    assert long_profile["htf_price_tolerance"] == pytest.approx(0.006)
+    assert long_profile["htf_trend_tolerance"] == pytest.approx(0.010)
+    assert _directional_min_raw_score("plus", "LONG") == 76.0
     assert _directional_min_raw_score("plus", "SHORT") == 76.0
