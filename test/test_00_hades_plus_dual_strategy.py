@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import importlib
 import inspect
 
 import pandas as pd
@@ -137,3 +138,20 @@ def test_closed_results_retain_strategy_and_regime_attribution():
     assert snapshot["strategy_name"] == "breakout_reset"
     assert snapshot["regime_state"] == "continuation_clean"
     assert snapshot["router_fallback_used"] is False
+
+
+def test_hades_lsr_ignores_legacy_keryntix_environment_overrides(monkeypatch):
+    monkeypatch.setenv("LSR_PLUS_MIN_CONFIRM_REL_VOLUME", "0.84")
+    monkeypatch.setenv("LSR_PLUS_MIN_CLOSE_POSITION", "0.55")
+    monkeypatch.setenv("LSR_PULLBACK_RETRACE_FRACTION", "0.42")
+    monkeypatch.setenv("LSR_PULLBACK_ATR_MIN", "0.24")
+    for name in (
+        "HADES_LSR_PLUS_MIN_CONFIRM_REL_VOLUME", "HADES_LSR_PLUS_MIN_CLOSE_POSITION",
+        "HADES_LSR_PULLBACK_RETRACE_FRACTION", "HADES_LSR_PULLBACK_ATR_MIN",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    isolated = importlib.reload(liquidity)
+    assert isolated.PLUS_PROFILE["min_confirm_rel_volume"] == 0.82
+    assert isolated.PLUS_PROFILE["min_close_position"] == 0.53
+    assert isolated.PULLBACK_RETRACE_FRACTION == 0.32
+    assert isolated.PULLBACK_ATR_MIN == 0.12
